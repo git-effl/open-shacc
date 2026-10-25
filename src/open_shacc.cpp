@@ -177,30 +177,4 @@ OPEN_SHACC_API int SceShaccCgDisassembleGxp(
     return OPEN_SHACC_SUCCESS;
 }
 
-#if defined(__vita__) || defined(__psp2__)
-/**
- * @brief User PRX module lifecycle and startup symbols for PlayStation Vita.
- */
-
-// __dso_handle is required by libstdc++ destructors when linking with -nostartfiles
-__attribute__((visibility("hidden"))) void* __dso_handle = (void*)&__dso_handle;
-
-// _free_vita_newlib is referenced by newlib libc exit routines in PRX mode
-void _free_vita_newlib(void) {}
-
-// Module lifecycle hooks defined in module.yml
-OPEN_SHACC_API int module_start([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
-    return 0; // SCE_KERNEL_START_SUCCESS
-}
-
-OPEN_SHACC_API int module_stop([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
-    return 0; // SCE_KERNEL_STOP_SUCCESS
-}
-
-// ELF entry point required by linker when building with -nostartfiles
-int _start([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
-    return 0;
-}
-#endif
-
 } // extern "C"

@@ -143,7 +143,7 @@ endif()
 # PlayStation Vita SUPRX Plugin Target
 # -----------------------------------------------------------------------------
 if(IS_VITA_BUILD)
-    add_executable(open-shacc-elf ${OPEN_SHACC_SOURCES} ${OPEN_SHACC_HEADERS})
+    add_executable(open-shacc-elf ${OPEN_SHACC_SOURCES} ${OPEN_SHACC_HEADERS} src/vita_prx.c)
     target_compile_definitions(open-shacc-elf PRIVATE OPEN_SHACC_BUILD_SUPRX)
     target_include_directories(open-shacc-elf
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
