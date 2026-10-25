@@ -1,4 +1,4 @@
-name: Build & Test open-shacc
+name: Build open-shacc for PlayStation Vita
 
 on:
   push:
@@ -8,78 +8,90 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: ${{ matrix.os }} (${{ matrix.compiler }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            compiler: gcc
-            cc: gcc
-            cxx: g++
-          - os: ubuntu-latest
-            compiler: clang
-            cc: clang
-            cxx: clang++
-          - os: macos-latest
-            compiler: clang
-            cc: clang
-            cxx: clang++
-          - os: windows-latest
-            compiler: msvc
-            cc: cl
-            cxx: cl
+  build-psvita:
+    name: PlayStation Vita (VitaSDK)
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Ninja & CMake
-        uses: numa08/setup-ninja@v1
-        with:
-          version: 1.11.1
-
-      - name: Set Compiler Environment (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Display VitaSDK Environment
         run: |
-          echo "CC=${{ matrix.cc }}" >> $GITHUB_ENV
-          echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
+          echo "VITASDK = $VITASDK"
+          arm-vita-eabi-gcc -v
+          arm-vita-eabi-g++ -v
+          cmake --version
 
-      - name: Configure CMake
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DOPEN_SHACC_BUILD_SHARED=ON
-          -DOPEN_SHACC_BUILD_STATIC=ON
-          -DOPEN_SHACC_BUILD_CLI=ON
-          -DOPEN_SHACC_BUILD_TESTS=ON
-
-      - name: Build Library, CLI & Tests
-        run: cmake --build build --config Release
-
-      - name: Run Clean-Room Test Suite
-        run: ctest --test-dir build --output-on-failure -C Release
-
-      - name: Test CLI with Sample Shaders
-        shell: bash
+      - name: Configure CMake for PS Vita
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            CLI="./build/open-shacc-cli.exe"
-          else
-            CLI="./build/open-shacc-cli"
-          fi
-          $CLI samples/basic_mvp.cg -o build/basic_mvp.gxp -v
-          $CLI samples/textured_lighting.cg -o build/textured_lighting.gxp -v
-          ls -lh build/*.gxp
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=${VITASDK}/share/vita.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPEN_SHACC_BUILD_STATIC=ON \
+            -DOPEN_SHACC_BUILD_SHARED=OFF \
+            -DOPEN_SHACC_BUILD_CLI=OFF \
+            -DOPEN_SHACC_BUILD_TESTS=OFF
 
-      - name: Upload Build Artifacts
+      - name: Build libopen-shacc.a for PS Vita
+        run: cmake --build build --config Release --verbose
+
+      - name: Verify PS Vita Static Archive
+        run: |
+          ls -lh build/libopen-shacc.a
+          arm-vita-eabi-nm -g --defined-only build/libopen-shacc.a | grep -i SceShaccCg
+
+      - name: Upload PS Vita Library Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: open-shacc-${{ matrix.os }}-${{ matrix.compiler }}
+          name: open-shacc-psvita
+          path: |
+            build/libopen-shacc.a
+            include/open_shacc.h
+            README.md
+
+  build-host:
+    name: Host Linux (CLI & Test Suite)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Host Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: Configure Host CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPEN_SHACC_BUILD_SHARED=ON \
+            -DOPEN_SHACC_BUILD_STATIC=ON \
+            -DOPEN_SHACC_BUILD_CLI=ON \
+            -DOPEN_SHACC_BUILD_TESTS=ON
+
+      - name: Build Host Library, CLI & Tests
+        run: cmake --build build --config Release
+
+      - name: Run Test Suite
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Test Sample Shader Compilation
+        run: |
+          ./build/open-shacc-cli samples/basic_mvp.cg -o build/basic_mvp.gxp -v
+          ./build/open-shacc-cli samples/textured_lighting.cg -o build/textured_lighting.gxp -v
+          ls -lh build/*.gxp
+
+      - name: Upload Host Tools & Shaders
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-shacc-host-tools
           path: |
             build/libopen-shacc*
-            build/open-shacc*
+            build/open-shacc-cli
             build/*.gxp
             include/open_shacc.h

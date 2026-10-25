@@ -11,6 +11,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # -----------------------------------------------------------------------------
+# PlayStation Vita (VitaSDK) Platform Detection
+# -----------------------------------------------------------------------------
+if(DEFINED VITA OR DEFINED VITASDK OR CMAKE_SYSTEM_NAME STREQUAL "Generic" OR CMAKE_SYSTEM_NAME STREQUAL "Vita")
+    set(IS_VITA_BUILD TRUE)
+    message(STATUS "Configuring open-shacc for PlayStation Vita (VitaSDK)")
+    set(OPEN_SHACC_BUILD_SHARED OFF CACHE BOOL "Shared library disabled on Vita" FORCE)
+    set(OPEN_SHACC_BUILD_CLI OFF CACHE BOOL "CLI disabled on Vita" FORCE)
+    set(OPEN_SHACC_BUILD_TESTS OFF CACHE BOOL "Tests disabled on Vita" FORCE)
+    add_compile_definitions(__psp2__ __vita__)
+endif()
+
+# -----------------------------------------------------------------------------
 # Build Options
 # -----------------------------------------------------------------------------
 option(OPEN_SHACC_BUILD_SHARED "Build open-shacc as a shared dynamic library" ON)

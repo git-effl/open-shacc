@@ -18,6 +18,16 @@
 #include <string>
 #include <sstream>
 
+static char* duplicate_string(const char* str) {
+    if (!str) return nullptr;
+    size_t len = std::strlen(str);
+    char* copy = static_cast<char*>(std::malloc(len + 1));
+    if (copy) {
+        std::memcpy(copy, str, len + 1);
+    }
+    return copy;
+}
+
 extern "C" {
 
 OPEN_SHACC_API int SceShaccCgCompileProgram(
@@ -30,7 +40,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
 ) {
     if (!source_code || !out_program_binary || !out_size) {
         if (out_diagnostic_log) {
-            *out_diagnostic_log = strdup("open-shacc: Null pointer passed in required arguments.");
+            *out_diagnostic_log = duplicate_string("open-shacc: Null pointer passed in required arguments.");
         }
         return OPEN_SHACC_ERROR_INVALID_ARGUMENT;
     }
@@ -55,7 +65,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     if (!parser.parse(tu)) {
         diag_stream << "[ERROR] Parsing failed:\n" << parser.get_diagnostics_string();
         if (out_diagnostic_log) {
-            *out_diagnostic_log = strdup(diag_stream.str().c_str());
+            *out_diagnostic_log = duplicate_string(diag_stream.str().c_str());
         }
         return OPEN_SHACC_ERROR_PARSE_FAILED;
     }
@@ -71,7 +81,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     if (!codegen.generate(tu, program)) {
         diag_stream << "[ERROR] Codegen failed: " << codegen.get_error_message() << "\n";
         if (out_diagnostic_log) {
-            *out_diagnostic_log = strdup(diag_stream.str().c_str());
+            *out_diagnostic_log = duplicate_string(diag_stream.str().c_str());
         }
         return OPEN_SHACC_ERROR_CODEGEN_FAILED;
     }
@@ -89,7 +99,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     if (!encoder.encode(program, gxp_bytes)) {
         diag_stream << "[ERROR] GXP packaging failed: " << encoder.get_error_message() << "\n";
         if (out_diagnostic_log) {
-            *out_diagnostic_log = strdup(diag_stream.str().c_str());
+            *out_diagnostic_log = duplicate_string(diag_stream.str().c_str());
         }
         return OPEN_SHACC_ERROR_PACKER_FAILED;
     }
@@ -99,7 +109,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     if (!buffer) {
         diag_stream << "[ERROR] Memory allocation failure for program binary\n";
         if (out_diagnostic_log) {
-            *out_diagnostic_log = strdup(diag_stream.str().c_str());
+            *out_diagnostic_log = duplicate_string(diag_stream.str().c_str());
         }
         return OPEN_SHACC_ERROR_OUT_OF_MEMORY;
     }
@@ -115,7 +125,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     }
 
     if (out_diagnostic_log) {
-        *out_diagnostic_log = strdup(diag_stream.str().c_str());
+        *out_diagnostic_log = duplicate_string(diag_stream.str().c_str());
     }
 
     return OPEN_SHACC_SUCCESS;
@@ -163,7 +173,7 @@ OPEN_SHACC_API int SceShaccCgDisassembleGxp(
     ss << "; Uniform Symbols: " << header->symbol_count << "\n";
     ss << "; Vertex Attributes: " << header->attribute_count << "\n";
 
-    *out_disasm = strdup(ss.str().c_str());
+    *out_disasm = duplicate_string(ss.str().c_str());
     return OPEN_SHACC_SUCCESS;
 }
 
