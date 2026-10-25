@@ -1,0 +1,27 @@
+// Textured Lit Vertex Shader with Dot Product N.L
+uniform float4x4 u_ModelViewProj;
+uniform float3   u_LightDirection;
+uniform float4   u_DiffuseColor;
+
+struct VertexIn {
+    float4 pos    : POSITION;
+    float3 normal : NORMAL;
+    float2 uv     : TEXCOORD0;
+};
+
+struct VertexOut {
+    float4 pos   : POSITION;
+    float2 uv    : TEXCOORD0;
+    float4 color : COLOR0;
+};
+
+VertexOut main(VertexIn vin) {
+    VertexOut vout;
+    vout.pos = mul(u_ModelViewProj, vin.pos);
+    vout.uv = vin.uv;
+
+    float ndotl = max(dot(vin.normal, u_LightDirection), 0.0);
+    vout.color = u_DiffuseColor * ndotl;
+
+    return vout;
+}

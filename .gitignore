@@ -1,0 +1,15 @@
+build/
+bin/
+lib/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.gxp
+compile_commands.json
+.vscode/
+.idea/
+.DS_Store
