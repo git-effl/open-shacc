@@ -41,6 +41,7 @@ else()
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
+        -Wno-missing-field-initializers
         -fvisibility=hidden
         -fvisibility-inlines-hidden
     )
@@ -148,21 +149,19 @@ if(IS_VITA_BUILD)
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    # Modules do not have a main() function; entry point is module_start.
+    # -nostartfiles prevents linking crt0.o and avoids undefined reference to main.
+    set_target_properties(open-shacc-elf PROPERTIES
+        LINK_FLAGS "-nostartfiles -Wl,-q"
+    )
 
     if(COMMAND vita_create_self)
         vita_create_self(open-shacc.suprx open-shacc-elf CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/module.yml)
-        add_custom_command(TARGET open-shacc.suprx POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy
-                ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.suprx
-                ${CMAKE_CURRENT_BINARY_DIR}/libshacccg.suprx
-            COMMENT "Creating drop-in libshacccg.suprx plugin copy"
-        )
     else()
         add_custom_command(TARGET open-shacc-elf POST_BUILD
             COMMAND vita-elf-create open-shacc-elf open-shacc.velf -e ${CMAKE_CURRENT_SOURCE_DIR}/module.yml
             COMMAND vita-make-fself -s open-shacc.velf open-shacc.suprx
-            COMMAND ${CMAKE_COMMAND} -E copy open-shacc.suprx libshacccg.suprx
-            COMMENT "Building open-shacc.suprx and libshacccg.suprx plugin"
+            COMMENT "Building open-shacc.suprx plugin"
         )
     endif()
 endif()
@@ -176,7 +175,6 @@ install(FILES include/open_shacc.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 if(IS_VITA_BUILD)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.suprx
-                  ${CMAKE_CURRENT_BINARY_DIR}/libshacccg.suprx
             DESTINATION ${CMAKE_INSTALL_PREFIX}/bin OPTIONAL)
 endif()
 

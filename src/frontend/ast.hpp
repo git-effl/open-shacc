@@ -111,9 +111,9 @@ struct Expression {
 
 struct LiteralExpr : public Expression {
     std::variant<float, int, bool> value;
-    explicit LiteralExpr(float f) { value = f; deduced_type = {BaseType::Float}; }
-    explicit LiteralExpr(int i) { value = i; deduced_type = {BaseType::Int}; }
-    explicit LiteralExpr(bool b) { value = b; deduced_type = {BaseType::Bool}; }
+    explicit LiteralExpr(float f) { value = f; deduced_type = DataType{BaseType::Float, ""}; }
+    explicit LiteralExpr(int i) { value = i; deduced_type = DataType{BaseType::Int, ""}; }
+    explicit LiteralExpr(bool b) { value = b; deduced_type = DataType{BaseType::Bool, ""}; }
 };
 
 struct VariableExpr : public Expression {

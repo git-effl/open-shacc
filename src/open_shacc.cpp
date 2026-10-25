@@ -188,8 +188,6 @@ OPEN_SHACC_API int module_start([[maybe_unused]] size_t argc, [[maybe_unused]] c
 OPEN_SHACC_API int module_stop([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
     return 0; // SCE_KERNEL_STOP_SUCCESS
 }
-
-void _start() __attribute__((weak, alias("module_start")));
 #endif
 
 } // extern "C"
