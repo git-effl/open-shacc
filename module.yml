@@ -6,7 +6,7 @@ open-shacc:
   main:
     start: module_start
     stop: module_stop
-  exports:
+  libraries:
     SceShaccCg:
       functions:
         - SceShaccCgCompileProgram
