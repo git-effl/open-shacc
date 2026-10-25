@@ -41,7 +41,7 @@ jobs:
 
       - name: Generate SUPRX Plugin Module
         run: |
-          if [ -f build/open-shacc-elf ]; then
+          if [ ! -f build/open-shacc.suprx ] && [ -f build/open-shacc-elf ]; then
             echo "Packaging SUPRX from open-shacc-elf..."
             vita-elf-create build/open-shacc-elf build/open-shacc.velf -e module.yml
             vita-make-fself -s build/open-shacc.velf build/open-shacc.suprx
