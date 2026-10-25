@@ -1,0 +1,85 @@
+name: Build & Test open-shacc
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+            cc: gcc
+            cxx: g++
+          - os: ubuntu-latest
+            compiler: clang
+            cc: clang
+            cxx: clang++
+          - os: macos-latest
+            compiler: clang
+            cc: clang
+            cxx: clang++
+          - os: windows-latest
+            compiler: msvc
+            cc: cl
+            cxx: cl
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Ninja & CMake
+        uses: numa08/setup-ninja@v1
+        with:
+          version: 1.11.1
+
+      - name: Set Compiler Environment (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          echo "CC=${{ matrix.cc }}" >> $GITHUB_ENV
+          echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DOPEN_SHACC_BUILD_SHARED=ON
+          -DOPEN_SHACC_BUILD_STATIC=ON
+          -DOPEN_SHACC_BUILD_CLI=ON
+          -DOPEN_SHACC_BUILD_TESTS=ON
+
+      - name: Build Library, CLI & Tests
+        run: cmake --build build --config Release
+
+      - name: Run Clean-Room Test Suite
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Test CLI with Sample Shaders
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CLI="./build/open-shacc-cli.exe"
+          else
+            CLI="./build/open-shacc-cli"
+          fi
+          $CLI samples/basic_mvp.cg -o build/basic_mvp.gxp -v
+          $CLI samples/textured_lighting.cg -o build/textured_lighting.gxp -v
+          ls -lh build/*.gxp
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-shacc-${{ matrix.os }}-${{ matrix.compiler }}
+          path: |
+            build/libopen-shacc*
+            build/open-shacc*
+            build/*.gxp
+            include/open_shacc.h
