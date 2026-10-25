@@ -43,7 +43,7 @@ else()
         -Wno-unused-parameter
         -Wno-missing-field-initializers
         -fvisibility=hidden
-        -fvisibility-inlines-hidden
+        $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>
     )
 endif()
 
@@ -154,7 +154,6 @@ if(IS_VITA_BUILD)
     set_target_properties(open-shacc-elf PROPERTIES
         LINK_FLAGS "-nostartfiles -Wl,-q"
     )
-    target_link_libraries(open-shacc-elf PRIVATE -lSceKernel_stub)
 
     if(COMMAND vita_create_self)
         vita_create_self(open-shacc.suprx open-shacc-elf CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/module.yml)
