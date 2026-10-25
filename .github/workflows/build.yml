@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-psvita:
-    name: PlayStation Vita (VitaSDK)
+    name: PlayStation Vita SUPRX Plugin (VitaSDK)
     runs-on: ubuntu-latest
     container:
       image: vitasdk/vitasdk:latest
@@ -24,6 +24,7 @@ jobs:
           arm-vita-eabi-gcc -v
           arm-vita-eabi-g++ -v
           cmake --version
+          which vita-elf-create vita-make-fself
 
       - name: Configure CMake for PS Vita
         run: |
@@ -35,21 +36,33 @@ jobs:
             -DOPEN_SHACC_BUILD_CLI=OFF \
             -DOPEN_SHACC_BUILD_TESTS=OFF
 
-      - name: Build libopen-shacc.a for PS Vita
+      - name: Build PS Vita Targets
         run: cmake --build build --config Release --verbose
 
-      - name: Verify PS Vita Static Archive
+      - name: Generate SUPRX Plugin Modules
         run: |
-          ls -lh build/libopen-shacc.a
-          arm-vita-eabi-nm -g --defined-only build/libopen-shacc.a | grep -i SceShaccCg
+          # Build target or run toolchain generator
+          if [ -f build/open-shacc-elf ]; then
+            echo "Packaging SUPRX from open-shacc-elf..."
+            vita-elf-create build/open-shacc-elf build/open-shacc.velf -e module.yml
+            vita-make-fself -s build/open-shacc.velf build/open-shacc.suprx
+            cp build/open-shacc.suprx build/libshacccg.suprx
+          fi
+          ls -lh build/*.suprx build/*.a
 
-      - name: Upload PS Vita Library Artifact
+      - name: Verify Export Symbols
+        run: |
+          arm-vita-eabi-nm -g --defined-only build/libopen-shacc.a | grep -E "(SceShaccCg|module_start|module_stop)"
+
+      - name: Upload PS Vita SUPRX Plugin & Library
         uses: actions/upload-artifact@v4
         with:
-          name: open-shacc-psvita
+          name: open-shacc-psvita-suprx-plugin
           path: |
+            build/*.suprx
             build/libopen-shacc.a
             include/open_shacc.h
+            module.yml
             README.md
 
   build-host:
@@ -60,7 +73,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Host Build Dependencies
+      - name: Install Host Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++
@@ -74,13 +87,13 @@ jobs:
             -DOPEN_SHACC_BUILD_CLI=ON \
             -DOPEN_SHACC_BUILD_TESTS=ON
 
-      - name: Build Host Library, CLI & Tests
+      - name: Build Host Tools & Tests
         run: cmake --build build --config Release
 
       - name: Run Test Suite
         run: ctest --test-dir build --output-on-failure -C Release
 
-      - name: Test Sample Shader Compilation
+      - name: Compile Sample Shaders with CLI
         run: |
           ./build/open-shacc-cli samples/basic_mvp.cg -o build/basic_mvp.gxp -v
           ./build/open-shacc-cli samples/textured_lighting.cg -o build/textured_lighting.gxp -v

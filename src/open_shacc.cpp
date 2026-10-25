@@ -177,4 +177,19 @@ OPEN_SHACC_API int SceShaccCgDisassembleGxp(
     return OPEN_SHACC_SUCCESS;
 }
 
+#if defined(__vita__) || defined(__psp2__)
+/**
+ * @brief User PRX module lifecycle entry points for PlayStation Vita.
+ */
+OPEN_SHACC_API int module_start([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
+    return 0; // SCE_KERNEL_START_SUCCESS
+}
+
+OPEN_SHACC_API int module_stop([[maybe_unused]] size_t argc, [[maybe_unused]] const void* args) {
+    return 0; // SCE_KERNEL_STOP_SUCCESS
+}
+
+void _start() __attribute__((weak, alias("module_start")));
+#endif
+
 } // extern "C"
