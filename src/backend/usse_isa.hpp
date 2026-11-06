@@ -48,7 +48,8 @@ enum class RegisterClass : uint8_t {
     Output    = 1, // 'o' / OUTPUT bank 1
     InputAttr = 2, // 'v' / PRIMATTR bank 2
     SecAttr   = 3, // 'sa' / SECATTR bank 3 (Uniforms/Constants)
-    Constant  = 4  // 'c' / FPCONSTANT bank
+    Constant  = 4, // 'c' / FPCONSTANT bank
+    TextureSampler = 5 // 's' / Texture sampler slot
 };
 
 struct HardwareRegister {
@@ -68,6 +69,7 @@ struct HardwareRegister {
             case RegisterClass::InputAttr: ss << "v" << static_cast<int>(index); break;
             case RegisterClass::SecAttr:   ss << "sa" << static_cast<int>(index); break;
             case RegisterClass::Constant:  ss << "c" << static_cast<int>(index); break;
+            case RegisterClass::TextureSampler: ss << "s" << static_cast<int>(index); break;
         }
         static const char kComponents[] = {'x', 'y', 'z', 'w'};
         if (sub_index < 4) {
