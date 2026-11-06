@@ -6,45 +6,45 @@ open-shacc:
   main:
     start: module_start
     stop: module_stop
-  libraries:
+  exports:
     SceShaccCg:
       nid: 0xA05BBEBB
       functions:
-        - sceShaccCgCompileProgram
-        - sceShaccCgDestroyCompileOutput
-        - sceShaccCgGetArrayParameter
-        - sceShaccCgGetArraySize
-        - sceShaccCgGetFirstParameter
-        - sceShaccCgGetFirstStructParameter
-        - sceShaccCgGetFirstUniformBlockParameter
-        - sceShaccCgGetNextParameter
-        - sceShaccCgGetParameterBaseType
-        - sceShaccCgGetParameterBufferIndex
-        - sceShaccCgGetParameterByName
-        - sceShaccCgGetParameterClass
-        - sceShaccCgGetParameterColumns
-        - sceShaccCgGetParameterDirection
-        - sceShaccCgGetParameterMemoryLayout
-        - sceShaccCgGetParameterName
-        - sceShaccCgGetParameterResourceIndex
-        - sceShaccCgGetParameterRows
-        - sceShaccCgGetParameterSemantic
-        - sceShaccCgGetParameterUserType
-        - sceShaccCgGetParameterVariability
-        - sceShaccCgGetParameterVectorWidth
-        - sceShaccCgGetRowParameter
-        - sceShaccCgGetSamplerQueryFormatPrecision
-        - sceShaccCgGetSamplerQueryFormatPrecisionCount
-        - sceShaccCgGetSamplerQueryFormatWidth
-        - sceShaccCgGetVersionString
-        - sceShaccCgInitializeCallbackList
-        - sceShaccCgInitializeCompileOptions
-        - sceShaccCgIsParameterReferenced
-        - sceShaccCgIsParameterRegFormat
-        - sceShaccCgReleaseCompiler
-        - sceShaccCgSetDefaultAllocator
-        - SceShaccCgCompileProgram
-        - SceShaccCgDestroyProgram
-        - SceShaccCgDestroyDiagnosticLog
-        - SceShaccCgGetVersion
-        - SceShaccCgDisassembleGxp
+        sceShaccCgInitializeCompileOptions: 0x9730ED49
+        sceShaccCgCompileProgram: 0x7B1C63B7
+        sceShaccCgSetDefaultAllocator: 0x7A7049ED
+        sceShaccCgInitializeCallbackList: 0xE8682EEB
+        sceShaccCgDestroyCompileOutput: 0x0984AA13
+        sceShaccCgReleaseCompiler: 0xFE241031
+        sceShaccCgGetVersionString: 0xBD72DA1D
+        sceShaccCgGetFirstParameter: 0x24C8FF2C
+        sceShaccCgGetNextParameter: 0x6FA519EE
+        sceShaccCgGetParameterByName: 0x19AA8EA8
+        sceShaccCgGetParameterName: 0xD6CD8FA2
+        sceShaccCgGetParameterClass: 0xF02BD7D4
+        sceShaccCgGetParameterBaseType: 0x3231FFDC
+        sceShaccCgGetParameterVariability: 0x0C2D812E
+        sceShaccCgGetParameterDirection: 0xCE7E8984
+        sceShaccCgGetParameterMemoryLayout: 0xC4F0E3DF
+        sceShaccCgGetParameterResourceIndex: 0xC70EBF51
+        sceShaccCgGetParameterBufferIndex: 0xB3273434
+        sceShaccCgGetParameterRows: 0x4EEB916B
+        sceShaccCgGetParameterColumns: 0x4CDA7453
+        sceShaccCgGetParameterVectorWidth: 0xAA8287F4
+        sceShaccCgGetArraySize: 0x0B8101E6
+        sceShaccCgGetArrayParameter: 0xB0566EC6
+        sceShaccCgGetRowParameter: 0x221376BE
+        sceShaccCgGetFirstStructParameter: 0xE6A5C161
+        sceShaccCgGetFirstUniformBlockParameter: 0x6195ED11
+        sceShaccCgGetParameterSemantic: 0x39E9628F
+        sceShaccCgGetParameterUserType: 0x1BAEE337
+        sceShaccCgIsParameterReferenced: 0x0FB04DCE
+        sceShaccCgIsParameterRegFormat: 0x2C4B7D9D
+        sceShaccCgGetSamplerQueryFormatPrecision: 0x68EC4DF5
+        sceShaccCgGetSamplerQueryFormatPrecisionCount: 0x759714FB
+        sceShaccCgGetSamplerQueryFormatWidth: 0x7C880629
+        SceShaccCgCompileProgram: 0x88776655
+        SceShaccCgDestroyProgram: 0x88776656
+        SceShaccCgDestroyDiagnosticLog: 0x88776657
+        SceShaccCgGetVersion: 0x88776658
+        SceShaccCgDisassembleGxp: 0x88776659
