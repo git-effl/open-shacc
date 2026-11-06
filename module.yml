@@ -6,7 +6,7 @@ open-shacc:
   main:
     start: module_start
     stop: module_stop
-  exports:
+  modules:
     SceShaccCg:
       nid: 0xA05BBEBB
       functions:
