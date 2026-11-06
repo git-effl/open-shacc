@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cctype>
+#include <cstring>
 #include <algorithm>
 #include <stack>
 
