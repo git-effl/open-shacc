@@ -153,8 +153,9 @@ if(IS_VITA_BUILD)
     )
     # Modules do not have a main() function; entry point is module_start.
     # -nostartfiles prevents linking crt0.o and avoids undefined reference to main.
+    # -Wl,--export-dynamic ensures all default-visibility symbols are kept in .dynsym for vita-elf-create.
     set_target_properties(open-shacc-elf PROPERTIES
-        LINK_FLAGS "-nostartfiles -Wl,-q"
+        LINK_FLAGS "-nostartfiles -Wl,-q -Wl,--export-dynamic"
     )
 
     if(COMMAND vita_create_self)
