@@ -169,6 +169,10 @@ OPEN_SHACC_API const char *sceShaccCgGetVersionString(void) {
     return "open-shacc 1.0.0 (Clean-room C++20 USSE/GXP Shader Compiler)";
 }
 
+OPEN_SHACC_API int sceShaccCgExtEnableExtensions(void) {
+    return 0; // SCE_OK
+}
+
 OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
     const SceShaccCgCompileOptions *options,
     const SceShaccCgCallbackList *callbacks,

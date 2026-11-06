@@ -241,6 +241,7 @@ OPEN_SHACC_API void sceShaccCgInitializeCallbackList(SceShaccCgCallbackList *cal
 OPEN_SHACC_API void sceShaccCgDestroyCompileOutput(SceShaccCgCompileOutput const *output);
 OPEN_SHACC_API void sceShaccCgReleaseCompiler(void);
 OPEN_SHACC_API const char *sceShaccCgGetVersionString(void);
+OPEN_SHACC_API int sceShaccCgExtEnableExtensions(void);
 
 /* Parameter Reflection APIs */
 OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetFirstParameter(const SceShaccCgCompileOutput *output);
