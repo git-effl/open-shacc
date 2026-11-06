@@ -6,9 +6,10 @@ open-shacc:
   main:
     start: module_start
     stop: module_stop
-  modules:
+  libraries:
     SceShaccCg:
       nid: 0xA05BBEBB
+      syscall: false
       functions:
         sceShaccCgInitializeCompileOptions: 0x9730ED49
         sceShaccCgCompileProgram: 0x7B1C63B7
