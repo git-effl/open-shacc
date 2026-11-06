@@ -23,75 +23,132 @@ enum class BaseType {
     Void,
     Bool,
     Int,
+    Short,
+    UShort,
+    Char,
+    UChar,
     Float,
+    Half,
+    Fixed,
     Float2,
     Float3,
     Float4,
+    Half2,
+    Half3,
+    Half4,
+    Float2x2,
+    Float3x3,
     Float4x4,
+    Half2x2,
+    Half3x3,
+    Half4x4,
     Sampler2D,
-    CustomStruct
+    SamplerCube,
+    CustomStruct,
+    UniformBlock
 };
 
 struct DataType {
     BaseType base = BaseType::Void;
     std::string struct_name; // if CustomStruct
+    uint32_t array_size = 1;  // 1 if scalar/vector/matrix; >1 if array
 
     [[nodiscard]] size_t component_count() const {
         switch (base) {
-            case BaseType::Float:  return 1;
-            case BaseType::Float2: return 2;
-            case BaseType::Float3: return 3;
-            case BaseType::Float4: return 4;
-            case BaseType::Float4x4: return 16;
-            case BaseType::Int:    return 1;
-            case BaseType::Bool:   return 1;
+            case BaseType::Float:
+            case BaseType::Half:
+            case BaseType::Fixed:
+            case BaseType::Int:
+            case BaseType::Short:
+            case BaseType::UShort:
+            case BaseType::Char:
+            case BaseType::UChar:
+            case BaseType::Bool:       return 1;
+            case BaseType::Float2:
+            case BaseType::Half2:      return 2;
+            case BaseType::Float3:
+            case BaseType::Half3:      return 3;
+            case BaseType::Float4:
+            case BaseType::Half4:      return 4;
+            case BaseType::Float2x2:
+            case BaseType::Half2x2:    return 4;
+            case BaseType::Float3x3:
+            case BaseType::Half3x3:    return 9;
+            case BaseType::Float4x4:
+            case BaseType::Half4x4:    return 16;
+            default: return 1;
+        }
+    }
+
+    [[nodiscard]] size_t matrix_rows() const {
+        switch (base) {
+            case BaseType::Float2x2:
+            case BaseType::Half2x2: return 2;
+            case BaseType::Float3x3:
+            case BaseType::Half3x3: return 3;
+            case BaseType::Float4x4:
+            case BaseType::Half4x4: return 4;
             default: return 0;
         }
     }
 
-    [[nodiscard]] size_t word_count() const {
-        return component_count(); // 32-bit words
+    [[nodiscard]] size_t matrix_cols() const {
+        return matrix_rows();
+    }
+
+    [[nodiscard]] bool is_matrix() const {
+        return matrix_rows() > 0;
+    }
+
+    [[nodiscard]] bool is_sampler() const {
+        return base == BaseType::Sampler2D || base == BaseType::SamplerCube;
     }
 
     [[nodiscard]] std::string to_string() const {
+        std::string s;
         switch (base) {
-            case BaseType::Void: return "void";
-            case BaseType::Bool: return "bool";
-            case BaseType::Int: return "int";
-            case BaseType::Float: return "float";
-            case BaseType::Float2: return "float2";
-            case BaseType::Float3: return "float3";
-            case BaseType::Float4: return "float4";
-            case BaseType::Float4x4: return "float4x4";
-            case BaseType::Sampler2D: return "sampler2D";
-            case BaseType::CustomStruct: return struct_name;
+            case BaseType::Void: s = "void"; break;
+            case BaseType::Bool: s = "bool"; break;
+            case BaseType::Int: s = "int"; break;
+            case BaseType::Short: s = "short"; break;
+            case BaseType::UShort: s = "ushort"; break;
+            case BaseType::Char: s = "char"; break;
+            case BaseType::UChar: s = "uchar"; break;
+            case BaseType::Float: s = "float"; break;
+            case BaseType::Half: s = "half"; break;
+            case BaseType::Fixed: s = "fixed"; break;
+            case BaseType::Float2: s = "float2"; break;
+            case BaseType::Float3: s = "float3"; break;
+            case BaseType::Float4: s = "float4"; break;
+            case BaseType::Half2: s = "half2"; break;
+            case BaseType::Half3: s = "half3"; break;
+            case BaseType::Half4: s = "half4"; break;
+            case BaseType::Float2x2: s = "float2x2"; break;
+            case BaseType::Float3x3: s = "float3x3"; break;
+            case BaseType::Float4x4: s = "float4x4"; break;
+            case BaseType::Half2x2: s = "half2x2"; break;
+            case BaseType::Half3x3: s = "half3x3"; break;
+            case BaseType::Half4x4: s = "half4x4"; break;
+            case BaseType::Sampler2D: s = "sampler2D"; break;
+            case BaseType::SamplerCube: s = "samplerCUBE"; break;
+            case BaseType::CustomStruct: s = struct_name; break;
+            case BaseType::UniformBlock: s = "uniform block"; break;
         }
-        return "unknown";
+        if (array_size > 1) {
+            s += "[" + std::to_string(array_size) + "]";
+        }
+        return s;
     }
 };
 
 enum class BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Dot,
-    Cross,
-    Equal,
-    NotEqual,
-    Less,
-    Greater
+    Add, Sub, Mul, Div, Mod,
+    Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    LogicalAnd, LogicalOr, BitAnd, BitOr, BitXor, Shl, Shr
 };
 
 enum class UnaryOp {
-    Negate,
-    LogicalNot,
-    Normalize,
-    Length,
-    Sin,
-    Cos,
-    Rcp,
-    Rsq
+    Negate, LogicalNot, BitNot, Incr, Decr
 };
 
 struct SourceLocation {
@@ -99,7 +156,6 @@ struct SourceLocation {
     uint32_t column = 1;
 };
 
-// Forward declaration
 struct Expression;
 using ExprPtr = std::unique_ptr<Expression>;
 
@@ -111,9 +167,9 @@ struct Expression {
 
 struct LiteralExpr : public Expression {
     std::variant<float, int, bool> value;
-    explicit LiteralExpr(float f) { value = f; deduced_type = DataType{BaseType::Float, ""}; }
-    explicit LiteralExpr(int i) { value = i; deduced_type = DataType{BaseType::Int, ""}; }
-    explicit LiteralExpr(bool b) { value = b; deduced_type = DataType{BaseType::Bool, ""}; }
+    explicit LiteralExpr(float f) { value = f; deduced_type = DataType{BaseType::Float, "", 1}; }
+    explicit LiteralExpr(int i) { value = i; deduced_type = DataType{BaseType::Int, "", 1}; }
+    explicit LiteralExpr(bool b) { value = b; deduced_type = DataType{BaseType::Bool, "", 1}; }
 };
 
 struct VariableExpr : public Expression {
@@ -123,10 +179,18 @@ struct VariableExpr : public Expression {
 
 struct SwizzleExpr : public Expression {
     ExprPtr target;
-    std::string components; // e.g., "xyzw", "x", "rgb", "wzyx"
+    std::string components;
 
     SwizzleExpr(ExprPtr t, std::string comps)
         : target(std::move(t)), components(std::move(comps)) {}
+};
+
+struct ArrayAccessExpr : public Expression {
+    ExprPtr target;
+    ExprPtr index;
+
+    ArrayAccessExpr(ExprPtr t, ExprPtr idx)
+        : target(std::move(t)), index(std::move(idx)) {}
 };
 
 struct BinaryExpr : public Expression {
@@ -141,13 +205,23 @@ struct BinaryExpr : public Expression {
 struct UnaryExpr : public Expression {
     UnaryOp op;
     ExprPtr operand;
+    bool is_postfix = false;
 
-    UnaryExpr(UnaryOp o, ExprPtr opnd)
-        : op(o), operand(std::move(opnd)) {}
+    UnaryExpr(UnaryOp o, ExprPtr opnd, bool postfix = false)
+        : op(o), operand(std::move(opnd)), is_postfix(postfix) {}
+};
+
+struct TernaryExpr : public Expression {
+    ExprPtr condition;
+    ExprPtr then_expr;
+    ExprPtr else_expr;
+
+    TernaryExpr(ExprPtr cond, ExprPtr t, ExprPtr e)
+        : condition(std::move(cond)), then_expr(std::move(t)), else_expr(std::move(e)) {}
 };
 
 struct CallExpr : public Expression {
-    std::string callee; // "mul", "dot", "dp3", "dp4", "max", "min", "clamp", "tex2D"
+    std::string callee;
     std::vector<ExprPtr> arguments;
 
     CallExpr(std::string name, std::vector<ExprPtr> args)
@@ -174,21 +248,37 @@ using StmtPtr = std::unique_ptr<Statement>;
 struct VarDeclStmt : public Statement {
     DataType type;
     std::string name;
-    std::string semantic; // e.g. "POSITION", "TEXCOORD0"
+    std::string semantic;
     ExprPtr initializer;
 };
 
 struct AssignStmt : public Statement {
     ExprPtr lvalue;
     ExprPtr rvalue;
+    BinaryOp compound_op = BinaryOp::Equal; // BinaryOp::Equal for standard '='
 };
 
 struct ReturnStmt : public Statement {
     ExprPtr value;
 };
 
+struct DiscardStmt : public Statement {};
+
 struct BlockStmt : public Statement {
     std::vector<StmtPtr> statements;
+};
+
+struct IfStmt : public Statement {
+    ExprPtr condition;
+    StmtPtr then_branch;
+    StmtPtr else_branch;
+};
+
+struct ForStmt : public Statement {
+    StmtPtr init;
+    ExprPtr condition;
+    StmtPtr increment;
+    StmtPtr body;
 };
 
 // Top-Level Declarations
@@ -207,15 +297,16 @@ struct UniformDecl {
     DataType type;
     std::string name;
     std::string semantic;
-    uint32_t register_offset = 0; // populated during allocation
+    uint32_t register_offset = 0;
 };
 
 struct ParameterDecl {
     DataType type;
     std::string name;
-    std::string semantic; // e.g. "POSITION", "NORMAL", "TEXCOORD0"
+    std::string semantic;
     bool is_in = true;
     bool is_out = false;
+    bool is_uniform = false;
 };
 
 struct FunctionDecl {

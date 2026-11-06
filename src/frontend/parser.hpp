@@ -64,13 +64,22 @@ private:
     StmtPtr parse_statement();
     StmtPtr parse_block_statement();
     StmtPtr parse_return_statement();
+    StmtPtr parse_if_statement();
+    StmtPtr parse_for_statement();
     StmtPtr parse_var_decl_or_assign();
 
     // Expression parsers
     ExprPtr parse_expression();
     ExprPtr parse_assignment();
+    ExprPtr parse_ternary();
+    ExprPtr parse_logical_or();
+    ExprPtr parse_logical_and();
+    ExprPtr parse_bitwise_or();
+    ExprPtr parse_bitwise_xor();
+    ExprPtr parse_bitwise_and();
     ExprPtr parse_equality();
     ExprPtr parse_relational();
+    ExprPtr parse_shift();
     ExprPtr parse_additive();
     ExprPtr parse_multiplicative();
     ExprPtr parse_unary();

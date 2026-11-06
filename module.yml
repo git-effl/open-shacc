@@ -8,7 +8,41 @@ open-shacc:
     stop: module_stop
   libraries:
     SceShaccCg:
+      nid: 0xA05BBEBB
       functions:
+        - sceShaccCgCompileProgram
+        - sceShaccCgDestroyCompileOutput
+        - sceShaccCgGetArrayParameter
+        - sceShaccCgGetArraySize
+        - sceShaccCgGetFirstParameter
+        - sceShaccCgGetFirstStructParameter
+        - sceShaccCgGetFirstUniformBlockParameter
+        - sceShaccCgGetNextParameter
+        - sceShaccCgGetParameterBaseType
+        - sceShaccCgGetParameterBufferIndex
+        - sceShaccCgGetParameterByName
+        - sceShaccCgGetParameterClass
+        - sceShaccCgGetParameterColumns
+        - sceShaccCgGetParameterDirection
+        - sceShaccCgGetParameterMemoryLayout
+        - sceShaccCgGetParameterName
+        - sceShaccCgGetParameterResourceIndex
+        - sceShaccCgGetParameterRows
+        - sceShaccCgGetParameterSemantic
+        - sceShaccCgGetParameterUserType
+        - sceShaccCgGetParameterVariability
+        - sceShaccCgGetParameterVectorWidth
+        - sceShaccCgGetRowParameter
+        - sceShaccCgGetSamplerQueryFormatPrecision
+        - sceShaccCgGetSamplerQueryFormatPrecisionCount
+        - sceShaccCgGetSamplerQueryFormatWidth
+        - sceShaccCgGetVersionString
+        - sceShaccCgInitializeCallbackList
+        - sceShaccCgInitializeCompileOptions
+        - sceShaccCgIsParameterReferenced
+        - sceShaccCgIsParameterRegFormat
+        - sceShaccCgReleaseCompiler
+        - sceShaccCgSetDefaultAllocator
         - SceShaccCgCompileProgram
         - SceShaccCgDestroyProgram
         - SceShaccCgDestroyDiagnosticLog

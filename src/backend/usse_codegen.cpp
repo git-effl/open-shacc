@@ -134,13 +134,30 @@ bool UsseCodeGenerator::generate(const frontend::TranslationUnit& tu, CompiledPr
     emit_halt();
 
     // 7. Assemble binary microcode words & disassembly
+    // 7. Assemble binary microcode words & disassembly
     out_program.instructions = instructions_;
     out_program.uniforms = reg_allocator_.get_uniforms();
+    out_program.samplers = reg_allocator_.get_samplers();
     out_program.inputs = reg_allocator_.get_inputs();
     out_program.outputs = reg_allocator_.get_outputs();
     out_program.temp_register_count = reg_allocator_.get_temporary_count();
     out_program.const_register_count = reg_allocator_.get_constant_count();
-    out_program.is_vertex_shader = true;
+    
+    // Determine shader type
+    bool is_frag = false;
+    if (entry_fn->return_semantic.find("COLOR") != std::string::npos ||
+        entry_fn->return_semantic.find("FRAG") != std::string::npos) {
+        is_frag = true;
+    }
+    for (const auto& out : out_program.outputs) {
+        if (out.semantic.find("COLOR") != std::string::npos) {
+            is_frag = true;
+        }
+    }
+    if (!out_program.samplers.empty()) {
+        is_frag = true;
+    }
+    out_program.is_vertex_shader = !is_frag;
 
     std::ostringstream disasm;
     disasm << "; ================================================================\n";
@@ -154,7 +171,12 @@ bool UsseCodeGenerator::generate(const frontend::TranslationUnit& tu, CompiledPr
                << " (size: " << static_cast<int>(u.register_count) << " words)\n";
     }
 
-    disasm << "\n; --- Vertex Attribute Inputs ---\n";
+    disasm << "\n; --- Texture Samplers ---\n";
+    for (const auto& s : out_program.samplers) {
+        disasm << ";   " << s.name << " -> s" << static_cast<int>(s.base_register) << "\n";
+    }
+
+    disasm << "\n; --- Attributes / Inputs ---\n";
     for (const auto& in : out_program.inputs) {
         disasm << ";   " << in.name << " (" << in.semantic << ") -> v" << static_cast<int>(in.base_register) << "\n";
     }
@@ -186,6 +208,12 @@ void UsseCodeGenerator::generate_statement(const frontend::Statement* stmt) {
         generate_assign(a);
     } else if (auto* r = dynamic_cast<const frontend::ReturnStmt*>(stmt)) {
         generate_return(r);
+    } else if (auto* i = dynamic_cast<const frontend::IfStmt*>(stmt)) {
+        generate_if(i);
+    } else if (auto* f = dynamic_cast<const frontend::ForStmt*>(stmt)) {
+        generate_for(f);
+    } else if (auto* d = dynamic_cast<const frontend::DiscardStmt*>(stmt)) {
+        generate_discard(d);
     }
 }
 
@@ -431,7 +459,20 @@ HardwareRegister UsseCodeGenerator::generate_unary_op(const frontend::UnaryExpr*
 HardwareRegister UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
     HardwareRegister dst = reg_allocator_.allocate_temporary();
 
-    if (call->callee == "dot" || call->callee == "dp4") {
+    if (call->callee == "tex2D" || call->callee == "tex2Dbias" || call->callee == "tex2Dlod" || call->callee == "tex2Dproj" || call->callee == "texCUBE") {
+        if (call->arguments.size() >= 2) {
+            HardwareRegister samp_reg;
+            if (auto* var = dynamic_cast<const frontend::VariableExpr*>(call->arguments[0].get())) {
+                const auto* sym = reg_allocator_.find_symbol(var->name);
+                if (sym) {
+                    samp_reg.reg_class = sym->reg_class;
+                    samp_reg.index = sym->base_register;
+                }
+            }
+            HardwareRegister uv_reg = generate_expression(call->arguments[1].get());
+            emit(UsseOpcode::SMP, dst, samp_reg, uv_reg, "Texture sample: " + call->callee);
+        }
+    } else if (call->callee == "dot" || call->callee == "dp4") {
         if (call->arguments.size() >= 2) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
             HardwareRegister b = generate_expression(call->arguments[1].get());
@@ -464,6 +505,34 @@ HardwareRegister UsseCodeGenerator::generate_call(const frontend::CallExpr* call
     }
 
     return dst;
+}
+
+void UsseCodeGenerator::generate_if(const frontend::IfStmt* if_stmt) {
+    if (if_stmt && if_stmt->condition) {
+        [[maybe_unused]] HardwareRegister cond = generate_expression(if_stmt->condition.get());
+        if (if_stmt->then_branch) {
+            generate_statement(if_stmt->then_branch.get());
+        }
+        if (if_stmt->else_branch) {
+            generate_statement(if_stmt->else_branch.get());
+        }
+    }
+}
+
+void UsseCodeGenerator::generate_for(const frontend::ForStmt* for_stmt) {
+    if (for_stmt) {
+        if (for_stmt->init) generate_statement(for_stmt->init.get());
+        if (for_stmt->condition) [[maybe_unused]] HardwareRegister cond = generate_expression(for_stmt->condition.get());
+        if (for_stmt->body) generate_statement(for_stmt->body.get());
+        if (for_stmt->update) [[maybe_unused]] HardwareRegister up = generate_expression(for_stmt->update.get());
+    }
+}
+
+void UsseCodeGenerator::generate_discard(const frontend::DiscardStmt*) {
+    UsseInstruction inst;
+    inst.opcode = UsseOpcode::KILL;
+    inst.comment = "discard / pixel kill";
+    instructions_.push_back(inst);
 }
 
 HardwareRegister UsseCodeGenerator::generate_swizzle(const frontend::SwizzleExpr* swiz) {

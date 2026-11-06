@@ -13,22 +13,45 @@
 namespace open_shacc::frontend {
 
 static const std::unordered_map<std::string_view, TokenType> kKeywords = {
-    {"struct",    TokenType::KwStruct},
-    {"uniform",   TokenType::KwUniform},
-    {"const",     TokenType::KwConst},
-    {"in",        TokenType::KwIn},
-    {"out",       TokenType::KwOut},
-    {"inout",     TokenType::KwInOut},
-    {"return",    TokenType::KwReturn},
-    {"void",      TokenType::KwVoid},
-    {"bool",      TokenType::KwBool},
-    {"int",       TokenType::KwInt},
-    {"float",     TokenType::KwFloat},
-    {"float2",    TokenType::KwFloat2},
-    {"float3",    TokenType::KwFloat3},
-    {"float4",    TokenType::KwFloat4},
-    {"float4x4",  TokenType::KwFloat4x4},
-    {"sampler2D", TokenType::KwSampler2D}
+    {"struct",      TokenType::KwStruct},
+    {"uniform",     TokenType::KwUniform},
+    {"const",       TokenType::KwConst},
+    {"varying",     TokenType::KwVarying},
+    {"in",          TokenType::KwIn},
+    {"out",         TokenType::KwOut},
+    {"inout",       TokenType::KwInOut},
+    {"inline",      TokenType::KwInline},
+    {"return",      TokenType::KwReturn},
+    {"discard",     TokenType::KwDiscard},
+    {"if",          TokenType::KwIf},
+    {"else",        TokenType::KwElse},
+    {"for",         TokenType::KwFor},
+    {"while",       TokenType::KwWhile},
+    {"void",        TokenType::KwVoid},
+    {"bool",        TokenType::KwBool},
+    {"int",         TokenType::KwInt},
+    {"short",       TokenType::KwShort},
+    {"ushort",      TokenType::KwUShort},
+    {"char",        TokenType::KwChar},
+    {"uchar",       TokenType::KwUChar},
+    {"float",       TokenType::KwFloat},
+    {"float2",      TokenType::KwFloat2},
+    {"float3",      TokenType::KwFloat3},
+    {"float4",      TokenType::KwFloat4},
+    {"float2x2",    TokenType::KwFloat2x2},
+    {"float3x3",    TokenType::KwFloat3x3},
+    {"float4x4",    TokenType::KwFloat4x4},
+    {"half",        TokenType::KwHalf},
+    {"half2",       TokenType::KwHalf2},
+    {"half3",       TokenType::KwHalf3},
+    {"half4",       TokenType::KwHalf4},
+    {"half2x2",     TokenType::KwHalf2x2},
+    {"half3x3",     TokenType::KwHalf3x3},
+    {"half4x4",     TokenType::KwHalf4x4},
+    {"fixed",       TokenType::KwFixed},
+    {"sampler2D",   TokenType::KwSampler2D},
+    {"samplerCUBE", TokenType::KwSamplerCube},
+    {"sampler_cube",TokenType::KwSamplerCube}
 };
 
 Lexer::Lexer(std::string_view source) : source_(source) {}
@@ -71,24 +94,17 @@ void Lexer::skip_whitespace_and_comments() {
         if (std::isspace(static_cast<unsigned char>(c))) {
             advance();
         } else if (c == '/' && peek_next() == '/') {
-            // Single-line comment
             advance(); advance();
             while (!is_at_end() && peek() != '\n') {
                 advance();
             }
         } else if (c == '/' && peek_next() == '*') {
-            // Multi-line comment
             advance(); advance();
             while (!is_at_end()) {
                 if (peek() == '*' && peek_next() == '/') {
                     advance(); advance();
                     break;
                 }
-                advance();
-            }
-        } else if (c == '#') {
-            // Preprocessor directive (e.g. #pragma, #version) - skip till newline
-            while (!is_at_end() && peek() != '\n') {
                 advance();
             }
         } else {
@@ -126,6 +142,22 @@ Token Lexer::scan_number() {
     uint32_t start_line = line_;
     size_t start_idx = cursor_;
 
+    // Hex literal check: 0x...
+    if (peek() == '0' && (peek_next() == 'x' || peek_next() == 'X')) {
+        advance(); advance();
+        while (!is_at_end() && std::isxdigit(static_cast<unsigned char>(peek()))) {
+            advance();
+        }
+        std::string_view text = source_.substr(start_idx, cursor_ - start_idx);
+        Token tok;
+        tok.type = TokenType::NumberLiteral;
+        tok.line = start_line;
+        tok.column = start_col;
+        tok.text = std::string(text);
+        tok.number_value = static_cast<double>(std::strtoul(tok.text.c_str(), nullptr, 16));
+        return tok;
+    }
+
     while (!is_at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
         advance();
     }
@@ -137,7 +169,6 @@ Token Lexer::scan_number() {
         }
     }
 
-    // Optional exponent (e.g. 1e-4)
     if (peek() == 'e' || peek() == 'E') {
         advance();
         if (peek() == '+' || peek() == '-') advance();
@@ -146,7 +177,6 @@ Token Lexer::scan_number() {
         }
     }
 
-    // Optional 'f' suffix
     if (peek() == 'f' || peek() == 'F') {
         advance();
     }
@@ -168,7 +198,7 @@ Token Lexer::scan_string() {
 
     std::string content;
     while (!is_at_end() && peek() != '"') {
-        if (peek() == '\\') advance(); // escape
+        if (peek() == '\\') advance();
         content.push_back(advance());
     }
     if (!is_at_end()) advance(); // Consume trailing "
@@ -194,7 +224,7 @@ std::vector<Token> Lexer::tokenize() {
 
         if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
             tokens.push_back(scan_identifier_or_keyword());
-        } else if (std::isdigit(static_cast<unsigned char>(c))) {
+        } else if (std::isdigit(static_cast<unsigned char>(c)) || (c == '.' && std::isdigit(static_cast<unsigned char>(peek_next())))) {
             tokens.push_back(scan_number());
         } else {
             advance();
@@ -214,48 +244,59 @@ std::vector<Token> Lexer::tokenize() {
                 case ':': tok.type = TokenType::Colon; break;
                 case ',': tok.type = TokenType::Comma; break;
                 case '.': tok.type = TokenType::Dot; break;
-                case '+': tok.type = TokenType::Plus; break;
-                case '-': tok.type = TokenType::Minus; break;
-                case '*': tok.type = TokenType::Star; break;
-                case '/': tok.type = TokenType::Slash; break;
+                case '?': tok.type = TokenType::Question; break;
+                case '%': tok.type = TokenType::Percent; break;
+                case '~': tok.type = TokenType::Tilde; break;
+                case '^': tok.type = TokenType::Caret; break;
+                case '+':
+                    if (match('+')) { tok.type = TokenType::PlusPlus; tok.text = "++"; }
+                    else if (match('=')) { tok.type = TokenType::PlusAssign; tok.text = "+="; }
+                    else { tok.type = TokenType::Plus; }
+                    break;
+                case '-':
+                    if (match('-')) { tok.type = TokenType::MinusMinus; tok.text = "--"; }
+                    else if (match('=')) { tok.type = TokenType::MinusAssign; tok.text = "-="; }
+                    else { tok.type = TokenType::Minus; }
+                    break;
+                case '*':
+                    if (match('=')) { tok.type = TokenType::StarAssign; tok.text = "*="; }
+                    else { tok.type = TokenType::Star; }
+                    break;
+                case '/':
+                    if (match('=')) { tok.type = TokenType::SlashAssign; tok.text = "/="; }
+                    else { tok.type = TokenType::Slash; }
+                    break;
                 case '!':
-                    if (match('=')) {
-                        tok.type = TokenType::NotEqual;
-                        tok.text = "!=";
-                    } else {
-                        tok.type = TokenType::Exclamation;
-                    }
+                    if (match('=')) { tok.type = TokenType::NotEqual; tok.text = "!="; }
+                    else { tok.type = TokenType::Exclamation; }
                     break;
                 case '=':
-                    if (match('=')) {
-                        tok.type = TokenType::Equal;
-                        tok.text = "==";
-                    } else {
-                        tok.type = TokenType::Assign;
-                    }
+                    if (match('=')) { tok.type = TokenType::Equal; tok.text = "=="; }
+                    else { tok.type = TokenType::Assign; }
                     break;
                 case '<':
-                    if (match('=')) {
-                        tok.type = TokenType::LessEqual;
-                        tok.text = "<=";
-                    } else {
-                        tok.type = TokenType::Less;
-                    }
+                    if (match('=')) { tok.type = TokenType::LessEqual; tok.text = "<="; }
+                    else if (match('<')) { tok.type = TokenType::Shl; tok.text = "<<"; }
+                    else { tok.type = TokenType::Less; }
                     break;
                 case '>':
-                    if (match('=')) {
-                        tok.type = TokenType::GreaterEqual;
-                        tok.text = ">=";
-                    } else {
-                        tok.type = TokenType::Greater;
-                    }
+                    if (match('=')) { tok.type = TokenType::GreaterEqual; tok.text = ">="; }
+                    else if (match('>')) { tok.type = TokenType::Shr; tok.text = ">>"; }
+                    else { tok.type = TokenType::Greater; }
+                    break;
+                case '&':
+                    if (match('&')) { tok.type = TokenType::AndAnd; tok.text = "&&"; }
+                    else { tok.type = TokenType::Ampersand; }
+                    break;
+                case '|':
+                    if (match('|')) { tok.type = TokenType::OrOr; tok.text = "||"; }
+                    else { tok.type = TokenType::Pipe; }
                     break;
                 case '"':
-                    cursor_--; // step back to rescan properly
+                    cursor_--;
                     tok = scan_string();
                     break;
                 default:
-                    // Unknown token, keep text
                     break;
             }
             tokens.push_back(tok);

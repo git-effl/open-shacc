@@ -54,6 +54,7 @@ set(OPEN_SHACC_SOURCES
     src/open_shacc.cpp
     src/frontend/lexer.cpp
     src/frontend/parser.cpp
+    src/frontend/preprocessor.cpp
     src/backend/regalloc.cpp
     src/backend/usse_codegen.cpp
     src/packer/gxp_encoder.cpp
@@ -64,6 +65,7 @@ set(OPEN_SHACC_HEADERS
     src/frontend/ast.hpp
     src/frontend/lexer.hpp
     src/frontend/parser.hpp
+    src/frontend/preprocessor.hpp
     src/backend/usse_isa.hpp
     src/backend/regalloc.hpp
     src/backend/usse_codegen.hpp

@@ -22,22 +22,13 @@ enum class TokenType {
     StringLiteral,
 
     // Keywords
-    KwStruct,
-    KwUniform,
-    KwConst,
-    KwIn,
-    KwOut,
-    KwInOut,
-    KwReturn,
-    KwVoid,
-    KwBool,
-    KwInt,
-    KwFloat,
-    KwFloat2,
-    KwFloat3,
-    KwFloat4,
-    KwFloat4x4,
-    KwSampler2D,
+    KwStruct, KwUniform, KwConst, KwVarying,
+    KwIn, KwOut, KwInOut, KwInline,
+    KwReturn, KwDiscard, KwIf, KwElse, KwFor, KwWhile,
+    KwVoid, KwBool, KwInt, KwShort, KwUShort, KwChar, KwUChar,
+    KwFloat, KwFloat2, KwFloat3, KwFloat4, KwFloat2x2, KwFloat3x3, KwFloat4x4,
+    KwHalf, KwHalf2, KwHalf3, KwHalf4, KwHalf2x2, KwHalf3x3, KwHalf4x4,
+    KwFixed, KwSampler2D, KwSamplerCube,
 
     // Symbols & Operators
     OpenParen,       // (
@@ -50,17 +41,33 @@ enum class TokenType {
     Colon,           // :
     Comma,           // ,
     Dot,             // .
+    Question,        // ?
     Assign,          // =
     Plus,            // +
     Minus,           // -
     Star,            // *
     Slash,           // /
+    Percent,         // %
+    PlusPlus,        // ++
+    MinusMinus,      // --
+    PlusAssign,      // +=
+    MinusAssign,     // -=
+    StarAssign,      // *=
+    SlashAssign,     // /=
     Equal,           // ==
     NotEqual,        // !=
     Less,            // <
     Greater,         // >
     LessEqual,       // <=
     GreaterEqual,    // >=
+    Ampersand,       // &
+    Pipe,            // |
+    Caret,           // ^
+    Tilde,           // ~
+    AndAnd,          // &&
+    OrOr,            // ||
+    Shl,             // <<
+    Shr,             // >>
     Exclamation      // !
 };
 

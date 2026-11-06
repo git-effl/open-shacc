@@ -35,6 +35,9 @@ public:
     // Allocate uniform constant registers (c0..c255)
     bool allocate_uniform(const std::string& name, const frontend::DataType& type, const std::string& semantic, SymbolBinding& out_binding);
 
+    // Allocate texture samplers (s0..s15)
+    bool allocate_sampler(const std::string& name, const frontend::DataType& type, SymbolBinding& out_binding);
+
     // Allocate input vertex attribute registers (v0..v15)
     bool allocate_input(const std::string& name, const frontend::DataType& type, const std::string& semantic, SymbolBinding& out_binding);
 
@@ -49,20 +52,24 @@ public:
     // Lookup
     [[nodiscard]] const SymbolBinding* find_symbol(const std::string& name) const;
     [[nodiscard]] const std::vector<SymbolBinding>& get_uniforms() const { return uniforms_; }
+    [[nodiscard]] const std::vector<SymbolBinding>& get_samplers() const { return samplers_; }
     [[nodiscard]] const std::vector<SymbolBinding>& get_inputs() const { return inputs_; }
     [[nodiscard]] const std::vector<SymbolBinding>& get_outputs() const { return outputs_; }
 
     [[nodiscard]] uint8_t get_temporary_count() const { return next_temporary_; }
     [[nodiscard]] uint8_t get_constant_count() const { return next_constant_; }
+    [[nodiscard]] uint8_t get_sampler_count() const { return next_sampler_; }
 
 private:
     uint8_t next_temporary_ = 0;
     uint8_t next_constant_ = 0;
     uint8_t next_input_ = 0;
     uint8_t next_output_ = 0;
+    uint8_t next_sampler_ = 0;
 
     std::unordered_map<std::string, SymbolBinding> symbol_table_;
     std::vector<SymbolBinding> uniforms_;
+    std::vector<SymbolBinding> samplers_;
     std::vector<SymbolBinding> inputs_;
     std::vector<SymbolBinding> outputs_;
 };

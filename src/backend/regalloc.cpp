@@ -18,8 +18,10 @@ void RegisterAllocator::reset() {
     next_constant_ = 0;
     next_input_ = 0;
     next_output_ = 0;
+    next_sampler_ = 0;
     symbol_table_.clear();
     uniforms_.clear();
+    samplers_.clear();
     inputs_.clear();
     outputs_.clear();
 }
@@ -30,12 +32,23 @@ bool RegisterAllocator::allocate_uniform(
     const std::string& semantic,
     SymbolBinding& out_binding
 ) {
+    if (type.is_sampler()) {
+        return allocate_sampler(name, type, out_binding);
+    }
+
     uint8_t words_needed = 0;
-    if (type.base == frontend::BaseType::Float4x4) {
+    if (type.base == frontend::BaseType::Float4x4 || type.base == frontend::BaseType::Float3x3 || type.base == frontend::BaseType::Float2x2) {
         // float4x4 requires 16 float words (or 4 vec4 registers = 16 scalar registers)
         words_needed = 16;
+        // Align to 4-word boundary for matrix uniforms
+        if (next_constant_ % 4 != 0) {
+            next_constant_ = static_cast<uint8_t>((next_constant_ + 3) & ~3);
+        }
     } else if (type.base == frontend::BaseType::Float4) {
         words_needed = 4;
+        if (next_constant_ % 4 != 0) {
+            next_constant_ = static_cast<uint8_t>((next_constant_ + 3) & ~3);
+        }
     } else if (type.base == frontend::BaseType::Float3) {
         words_needed = 3;
     } else if (type.base == frontend::BaseType::Float2) {
@@ -59,6 +72,29 @@ bool RegisterAllocator::allocate_uniform(
 
     symbol_table_[name] = out_binding;
     uniforms_.push_back(out_binding);
+    return true;
+}
+
+bool RegisterAllocator::allocate_sampler(
+    const std::string& name,
+    const frontend::DataType& type,
+    SymbolBinding& out_binding
+) {
+    if (next_sampler_ >= 16) {
+        return false; // Exceeded texture sampler slots (s0..s15)
+    }
+
+    out_binding.name = name;
+    out_binding.type = type;
+    out_binding.reg_class = RegisterClass::TextureSampler;
+    out_binding.base_register = next_sampler_;
+    out_binding.register_count = 1;
+    out_binding.semantic = "";
+
+    next_sampler_++;
+
+    symbol_table_[name] = out_binding;
+    samplers_.push_back(out_binding);
     return true;
 }
 

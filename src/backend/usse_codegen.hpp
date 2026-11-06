@@ -22,6 +22,7 @@ struct CompiledProgram {
     std::vector<uint32_t> microcode_words;
     std::string disassembly;
     std::vector<SymbolBinding> uniforms;
+    std::vector<SymbolBinding> samplers;
     std::vector<SymbolBinding> inputs;
     std::vector<SymbolBinding> outputs;
     uint8_t temp_register_count = 0;
@@ -60,6 +61,9 @@ private:
     void generate_var_decl(const frontend::VarDeclStmt* decl);
     void generate_assign(const frontend::AssignStmt* assign);
     void generate_return(const frontend::ReturnStmt* ret);
+    void generate_if(const frontend::IfStmt* if_stmt);
+    void generate_for(const frontend::ForStmt* for_stmt);
+    void generate_discard(const frontend::DiscardStmt* discard_stmt);
 
     // Matrix multiply helper
     std::vector<HardwareRegister> generate_matrix_vector_mul(

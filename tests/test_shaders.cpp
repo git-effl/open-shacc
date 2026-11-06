@@ -26,6 +26,10 @@ static int g_tests_failed = 0;
 void test_version() {
     const char* ver = SceShaccCgGetVersion();
     TEST_ASSERT(ver != nullptr && std::string(ver).find("open-shacc") != std::string::npos, "Version string contains open-shacc");
+
+    const char* scver = sceShaccCgGetVersionString();
+    TEST_ASSERT(scver != nullptr && std::string(scver).find("open-shacc") != std::string::npos, "sceShaccCg version string contains open-shacc");
+
     g_tests_passed++;
     std::cout << "  [PASS] test_version\n";
 }
@@ -62,7 +66,6 @@ void test_basic_mvp_shader() {
     int res = SceShaccCgCompileProgram(shader_code, OPEN_SHACC_OPT_VERBOSE_DISASSEMBLY, nullptr, &bin, &size, &log);
 
     if (log) {
-        // std::cout << log << "\n";
         SceShaccCgDestroyDiagnosticLog(log);
     }
 
@@ -78,6 +81,46 @@ void test_basic_mvp_shader() {
     SceShaccCgDestroyProgram(bin);
     g_tests_passed++;
     std::cout << "  [PASS] test_basic_mvp_shader\n";
+}
+
+void test_sceshacccg_abi_and_reflection() {
+    const char* shader_code = R"(
+        uniform float4x4 u_MVPMatrix;
+        uniform sampler2D texSampler;
+
+        float4 main(float2 uv : TEXCOORD0) : COLOR {
+            float4 col = tex2D(texSampler, uv);
+            return col;
+        }
+    )";
+
+    SceShaccCgCompileOptions opts;
+    sceShaccCgInitializeCompileOptions(&opts);
+    opts.mainSourceFile = shader_code;
+    opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+
+    const SceShaccCgCompileOutput* output = sceShaccCgCompileProgram(&opts, nullptr, 0);
+    TEST_ASSERT(output != nullptr, "sceShaccCgCompileProgram must return non-null output");
+    TEST_ASSERT(output->programData != nullptr, "programData must not be null");
+    TEST_ASSERT(output->programSize > 0, "programSize must be > 0");
+
+    // Test parameter reflection queries
+    SceShaccCgParameter p_mvp = sceShaccCgGetParameterByName(output, "u_MVPMatrix");
+    TEST_ASSERT(p_mvp != nullptr, "Should find u_MVPMatrix uniform parameter");
+    TEST_ASSERT(sceShaccCgGetParameterClass(p_mvp) == SCE_SHACCCG_PARAMETERCLASS_MATRIX, "u_MVPMatrix must be matrix class");
+    TEST_ASSERT(sceShaccCgGetParameterRows(p_mvp) == 4, "u_MVPMatrix rows must be 4");
+
+    SceShaccCgParameter p_samp = sceShaccCgGetParameterByName(output, "texSampler");
+    TEST_ASSERT(p_samp != nullptr, "Should find texSampler parameter");
+    TEST_ASSERT(sceShaccCgGetParameterClass(p_samp) == SCE_SHACCCG_PARAMETERCLASS_SAMPLER, "texSampler must be sampler class");
+
+    SceShaccCgParameter first_p = sceShaccCgGetFirstParameter(output);
+    TEST_ASSERT(first_p != nullptr, "GetFirstParameter must return a valid parameter");
+
+    sceShaccCgDestroyCompileOutput(output);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_sceshacccg_abi_and_reflection\n";
 }
 
 void test_dot_product_lighting() {
@@ -134,6 +177,7 @@ int main() {
     std::cout << "Running open-shacc Clean-Room Test Suite...\n";
     test_version();
     test_basic_mvp_shader();
+    test_sceshacccg_abi_and_reflection();
     test_dot_product_lighting();
     test_syntax_error_handling();
 
