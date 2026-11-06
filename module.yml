@@ -9,7 +9,6 @@ SceShaccCg:
   libraries:
     SceShaccCg:
       nid: 0xA05BBEBB
-      shared: true
       functions:
         - sceShaccCgCompileProgram
         - sceShaccCgDestroyCompileOutput
