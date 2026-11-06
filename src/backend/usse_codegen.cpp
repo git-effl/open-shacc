@@ -231,12 +231,12 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
         if (components == 1) {
             HardwareRegister r = generate_expression(decl->initializer.get());
             HardwareRegister var_reg = reg_allocator_.allocate_temporary();
-            emit(UsseOpcode::MOV, var_reg, r, HardwareRegister{}, "Declare " + decl->name);
+            emit(UsseOpcode::VMOV, var_reg, r, HardwareRegister{}, "Declare " + decl->name);
         } else {
             auto regs = generate_vector_expression(decl->initializer.get(), components);
             auto var_regs = reg_allocator_.allocate_temporary_vector(static_cast<uint8_t>(components));
             for (size_t i = 0; i < components && i < regs.size(); ++i) {
-                emit(UsseOpcode::MOV, var_regs[i], regs[i], HardwareRegister{}, decl->name + "[" + std::to_string(i) + "]");
+                emit(UsseOpcode::VMOV, var_regs[i], regs[i], HardwareRegister{}, decl->name + "[" + std::to_string(i) + "]");
             }
         }
     }
@@ -251,7 +251,7 @@ void UsseCodeGenerator::generate_assign(const frontend::AssignStmt* assign) {
             HardwareRegister dst;
             dst.reg_class = sym->reg_class;
             dst.index = sym->base_register;
-            emit(UsseOpcode::MOV, dst, val_reg, HardwareRegister{}, "Assign to " + var->name);
+            emit(UsseOpcode::VMOV, dst, val_reg, HardwareRegister{}, "Assign to " + var->name);
         }
     } else if (auto* swiz = dynamic_cast<const frontend::SwizzleExpr*>(assign->lvalue.get())) {
         // e.g. output.position = ...
@@ -268,7 +268,7 @@ void UsseCodeGenerator::generate_assign(const frontend::AssignStmt* assign) {
                     dst.reg_class = sym->reg_class;
                     dst.index = sym->base_register + static_cast<uint8_t>(i);
                     dst.sub_index = static_cast<uint8_t>(i % 4);
-                    emit(UsseOpcode::MOV, dst, rhs_regs[i], HardwareRegister{}, full_name + " write");
+                    emit(UsseOpcode::VMOV, dst, rhs_regs[i], HardwareRegister{}, full_name + " write");
                 }
             }
         }
@@ -293,7 +293,7 @@ void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
             dst.reg_class = RegisterClass::Output;
             dst.index = static_cast<uint8_t>(i);
             dst.sub_index = static_cast<uint8_t>(i);
-            emit(UsseOpcode::MOV, dst, result_regs[i], HardwareRegister{}, "Vertex output o" + std::to_string(i));
+            emit(UsseOpcode::VMOV, dst, result_regs[i], HardwareRegister{}, "Vertex output o" + std::to_string(i));
         }
     }
 }
@@ -308,7 +308,7 @@ std::vector<HardwareRegister> UsseCodeGenerator::generate_matrix_vector_mul(
     const auto* sym = reg_allocator_.find_symbol(matrix_name);
     uint8_t base_c = sym ? sym->base_register : 0;
 
-    // Multiply 4x4 matrix by 4-component vector via 4 DOT4 instructions
+    // Multiply 4x4 matrix by 4-component vector via 4 VDP4 instructions
     // row 0: c[base + 0 .. base + 3]
     // row 1: c[base + 4 .. base + 7]
     // row 2: c[base + 8 .. base + 11]
@@ -322,7 +322,7 @@ std::vector<HardwareRegister> UsseCodeGenerator::generate_matrix_vector_mul(
 
         HardwareRegister v_in = vec.empty() ? reg_allocator_.allocate_temporary() : vec[0];
 
-        emit(UsseOpcode::DOT4, dst, m_row, v_in, "mul(" + matrix_name + " row " + std::to_string(row) + ", v)");
+        emit(UsseOpcode::VDP4, dst, m_row, v_in, "mul(" + matrix_name + " row " + std::to_string(row) + ", v)");
         out_regs.push_back(dst);
     }
 
@@ -398,9 +398,9 @@ std::vector<HardwareRegister> UsseCodeGenerator::generate_vector_expression(
         auto left_regs = generate_vector_expression(bin->left.get(), expected_components);
         auto right_regs = generate_vector_expression(bin->right.get(), expected_components);
 
-        UsseOpcode op = UsseOpcode::FADD;
-        if (bin->op == frontend::BinaryOp::Sub) op = UsseOpcode::FSUB;
-        else if (bin->op == frontend::BinaryOp::Mul) op = UsseOpcode::FMUL;
+        UsseOpcode op = UsseOpcode::VADD;
+        if (bin->op == frontend::BinaryOp::Sub) op = UsseOpcode::VSUB;
+        else if (bin->op == frontend::BinaryOp::Mul) op = UsseOpcode::VMUL;
 
         for (size_t i = 0; i < expected_components; ++i) {
             HardwareRegister dst = reg_allocator_.allocate_temporary(static_cast<uint8_t>(i % 4));
@@ -425,13 +425,12 @@ HardwareRegister UsseCodeGenerator::generate_binary_op(const frontend::BinaryExp
     HardwareRegister right = generate_expression(bin->right.get());
     HardwareRegister dst = reg_allocator_.allocate_temporary();
 
-    UsseOpcode op = UsseOpcode::FADD;
+    UsseOpcode op = UsseOpcode::VADD;
     switch (bin->op) {
-        case frontend::BinaryOp::Add: op = UsseOpcode::FADD; break;
-        case frontend::BinaryOp::Sub: op = UsseOpcode::FSUB; break;
-        case frontend::BinaryOp::Mul: op = UsseOpcode::FMUL; break;
-        case frontend::BinaryOp::Dot: op = UsseOpcode::DOT4; break;
-        default: op = UsseOpcode::FADD; break;
+        case frontend::BinaryOp::Add: op = UsseOpcode::VADD; break;
+        case frontend::BinaryOp::Sub: op = UsseOpcode::VSUB; break;
+        case frontend::BinaryOp::Mul: op = UsseOpcode::VMUL; break;
+        default: op = UsseOpcode::VADD; break;
     }
 
     emit(op, dst, left, right);
@@ -444,13 +443,9 @@ HardwareRegister UsseCodeGenerator::generate_unary_op(const frontend::UnaryExpr*
 
     if (un->op == frontend::UnaryOp::Negate) {
         opnd.is_negated = !opnd.is_negated;
-        emit(UsseOpcode::MOV, dst, opnd, HardwareRegister{}, "Negate");
-    } else if (un->op == frontend::UnaryOp::Rcp) {
-        emit(UsseOpcode::RCP, dst, opnd, HardwareRegister{}, "Reciprocal");
-    } else if (un->op == frontend::UnaryOp::Rsq) {
-        emit(UsseOpcode::RSQ, dst, opnd, HardwareRegister{}, "Reciprocal square root");
+        emit(UsseOpcode::VMOV, dst, opnd, HardwareRegister{}, "Negate");
     } else {
-        emit(UsseOpcode::MOV, dst, opnd, HardwareRegister{});
+        emit(UsseOpcode::VMOV, dst, opnd, HardwareRegister{});
     }
 
     return dst;
@@ -476,31 +471,31 @@ HardwareRegister UsseCodeGenerator::generate_call(const frontend::CallExpr* call
         if (call->arguments.size() >= 2) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
             HardwareRegister b = generate_expression(call->arguments[1].get());
-            emit(UsseOpcode::DOT4, dst, a, b, "dot4");
+            emit(UsseOpcode::VDP4, dst, a, b, "dot4");
         }
     } else if (call->callee == "dp3") {
         if (call->arguments.size() >= 2) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
             HardwareRegister b = generate_expression(call->arguments[1].get());
-            emit(UsseOpcode::DOT3, dst, a, b, "dot3");
+            emit(UsseOpcode::VDP3, dst, a, b, "dot3");
         }
     } else if (call->callee == "max") {
         if (call->arguments.size() >= 2) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
             HardwareRegister b = generate_expression(call->arguments[1].get());
-            emit(UsseOpcode::MAX, dst, a, b);
+            emit(UsseOpcode::VMAX, dst, a, b);
         }
     } else if (call->callee == "min") {
         if (call->arguments.size() >= 2) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
             HardwareRegister b = generate_expression(call->arguments[1].get());
-            emit(UsseOpcode::MIN, dst, a, b);
+            emit(UsseOpcode::VMIN, dst, a, b);
         }
     } else {
         // Generic fallback
         if (!call->arguments.empty()) {
             HardwareRegister a = generate_expression(call->arguments[0].get());
-            emit(UsseOpcode::MOV, dst, a, HardwareRegister{}, "Call " + call->callee);
+            emit(UsseOpcode::VMOV, dst, a, HardwareRegister{}, "Call " + call->callee);
         }
     }
 
@@ -524,7 +519,7 @@ void UsseCodeGenerator::generate_for(const frontend::ForStmt* for_stmt) {
         if (for_stmt->init) generate_statement(for_stmt->init.get());
         if (for_stmt->condition) [[maybe_unused]] HardwareRegister cond = generate_expression(for_stmt->condition.get());
         if (for_stmt->body) generate_statement(for_stmt->body.get());
-        if (for_stmt->update) [[maybe_unused]] HardwareRegister up = generate_expression(for_stmt->update.get());
+        if (for_stmt->increment) generate_statement(for_stmt->increment.get());
     }
 }
 
@@ -564,7 +559,7 @@ HardwareRegister UsseCodeGenerator::generate_variable(const frontend::VariableEx
 HardwareRegister UsseCodeGenerator::generate_literal(const frontend::LiteralExpr* lit) {
     HardwareRegister r = reg_allocator_.allocate_temporary();
     // In USSE microcode literals are typically loaded or referenced via constant bank
-    emit(UsseOpcode::MOV, r, r, HardwareRegister{}, "Literal load");
+    emit(UsseOpcode::VMOV, r, r, HardwareRegister{}, "Literal load");
     return r;
 }
 
