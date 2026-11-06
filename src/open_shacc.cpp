@@ -103,15 +103,17 @@ static SceShaccCgParameterBaseType data_type_to_base_type(const open_shacc::fron
         case open_shacc::frontend::BaseType::Half4:
             return SCE_SHACCCG_BASETYPE_HALF;
         case open_shacc::frontend::BaseType::Fixed:
-        case open_shacc::frontend::BaseType::Fixed2:
-        case open_shacc::frontend::BaseType::Fixed3:
-        case open_shacc::frontend::BaseType::Fixed4:
             return SCE_SHACCCG_BASETYPE_FIXED;
         case open_shacc::frontend::BaseType::Int:
-        case open_shacc::frontend::BaseType::Int2:
-        case open_shacc::frontend::BaseType::Int3:
-        case open_shacc::frontend::BaseType::Int4:
             return SCE_SHACCCG_BASETYPE_INT;
+        case open_shacc::frontend::BaseType::Short:
+            return SCE_SHACCCG_BASETYPE_SHORT;
+        case open_shacc::frontend::BaseType::UShort:
+            return SCE_SHACCCG_BASETYPE_USHORT;
+        case open_shacc::frontend::BaseType::Char:
+            return SCE_SHACCCG_BASETYPE_CHAR;
+        case open_shacc::frontend::BaseType::UChar:
+            return SCE_SHACCCG_BASETYPE_UCHAR;
         case open_shacc::frontend::BaseType::Bool:
             return SCE_SHACCCG_BASETYPE_BOOL;
         default:

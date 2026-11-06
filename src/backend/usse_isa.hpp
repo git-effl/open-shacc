@@ -214,11 +214,11 @@ struct UsseInstruction {
     [[nodiscard]] MicrocodeWord to_microcode() const {
         switch (opcode) {
             case UsseOpcode::PHAS: return MicrocodeWord::encode_phas(true);
+            case UsseOpcode::HALT: return MicrocodeWord::encode_phas(true);
             case UsseOpcode::VMOV: return MicrocodeWord::encode_vmov(dst, src0, write_mask);
             case UsseOpcode::VPCK: return MicrocodeWord::encode_vpck(dst, src0, src1, write_mask);
             case UsseOpcode::SMP:  return MicrocodeWord::encode_smp(dst, src0, src1.index);
             case UsseOpcode::KILL: return MicrocodeWord::encode_kill();
-            case UsseOpcode::PHAS + 1: return MicrocodeWord::encode_phas(true);
             default:               return MicrocodeWord::encode_v32nmad(opcode, dst, src0, src1, write_mask);
         }
     }
@@ -238,6 +238,9 @@ struct UsseInstruction {
             case UsseOpcode::VRSQ: ss << "VRSQ " << dst.to_string() << ", " << src0.to_string(); break;
             case UsseOpcode::VMIN: ss << "VMIN " << dst.to_string() << ", " << src0.to_string() << ", " << src1.to_string(); break;
             case UsseOpcode::VMAX: ss << "VMAX " << dst.to_string() << ", " << src0.to_string() << ", " << src1.to_string(); break;
+            case UsseOpcode::VFRC: ss << "VFRC " << dst.to_string() << ", " << src0.to_string(); break;
+            case UsseOpcode::VDSX: ss << "VDSX " << dst.to_string() << ", " << src0.to_string(); break;
+            case UsseOpcode::VDSY: ss << "VDSY " << dst.to_string() << ", " << src0.to_string(); break;
             case UsseOpcode::VPCK: ss << "VPCK " << dst.to_string() << ", " << src0.to_string() << ", " << src1.to_string(); break;
             case UsseOpcode::SMP:  ss << "SMP  " << dst.to_string() << ", " << src0.to_string() << ", sa" << static_cast<int>(src1.index); break;
             case UsseOpcode::KILL: ss << "KILL"; break;
