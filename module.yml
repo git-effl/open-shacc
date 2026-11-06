@@ -9,40 +9,41 @@ SceShaccCg:
   libraries:
     SceShaccCg:
       nid: 0xA05BBEBB
+      shared: true
       functions:
-        - sceShaccCgInitializeCompileOptions
         - sceShaccCgCompileProgram
-        - sceShaccCgSetDefaultAllocator
-        - sceShaccCgInitializeCallbackList
         - sceShaccCgDestroyCompileOutput
-        - sceShaccCgReleaseCompiler
-        - sceShaccCgGetVersionString
-        - sceShaccCgGetFirstParameter
-        - sceShaccCgGetNextParameter
-        - sceShaccCgGetParameterByName
-        - sceShaccCgGetParameterName
-        - sceShaccCgGetParameterClass
-        - sceShaccCgGetParameterBaseType
-        - sceShaccCgGetParameterVariability
-        - sceShaccCgGetParameterDirection
-        - sceShaccCgGetParameterMemoryLayout
-        - sceShaccCgGetParameterResourceIndex
-        - sceShaccCgGetParameterBufferIndex
-        - sceShaccCgGetParameterRows
-        - sceShaccCgGetParameterColumns
-        - sceShaccCgGetParameterVectorWidth
-        - sceShaccCgGetArraySize
         - sceShaccCgGetArrayParameter
-        - sceShaccCgGetRowParameter
+        - sceShaccCgGetArraySize
+        - sceShaccCgGetFirstParameter
         - sceShaccCgGetFirstStructParameter
         - sceShaccCgGetFirstUniformBlockParameter
+        - sceShaccCgGetNextParameter
+        - sceShaccCgGetParameterBaseType
+        - sceShaccCgGetParameterBufferIndex
+        - sceShaccCgGetParameterByName
+        - sceShaccCgGetParameterClass
+        - sceShaccCgGetParameterColumns
+        - sceShaccCgGetParameterDirection
+        - sceShaccCgGetParameterMemoryLayout
+        - sceShaccCgGetParameterName
+        - sceShaccCgGetParameterResourceIndex
+        - sceShaccCgGetParameterRows
         - sceShaccCgGetParameterSemantic
         - sceShaccCgGetParameterUserType
-        - sceShaccCgIsParameterReferenced
-        - sceShaccCgIsParameterRegFormat
+        - sceShaccCgGetParameterVariability
+        - sceShaccCgGetParameterVectorWidth
+        - sceShaccCgGetRowParameter
         - sceShaccCgGetSamplerQueryFormatPrecision
         - sceShaccCgGetSamplerQueryFormatPrecisionCount
         - sceShaccCgGetSamplerQueryFormatWidth
+        - sceShaccCgGetVersionString
+        - sceShaccCgInitializeCallbackList
+        - sceShaccCgInitializeCompileOptions
+        - sceShaccCgIsParameterReferenced
+        - sceShaccCgIsParameterRegFormat
+        - sceShaccCgReleaseCompiler
+        - sceShaccCgSetDefaultAllocator
         - SceShaccCgCompileProgram
         - SceShaccCgDestroyProgram
         - SceShaccCgDestroyDiagnosticLog
