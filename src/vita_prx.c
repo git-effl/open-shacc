@@ -25,8 +25,8 @@ extern int sceShaccCgExtEnableExtensions(void);
 #if __has_include(<taihen.h>)
 #include <taihen.h>
 
-/* Weak symbol declaration so linking succeeds whether or not taihen_stub is linked */
-__attribute__((weak)) int taiHookFunctionImportForUser(tai_hook_ref_t *ref, const char *module_name, uint32_t library_nid, uint32_t func_nid, const void *func);
+/* Weak symbol declaration matching taihen.h so linking succeeds whether or not taihen_stub is linked */
+__attribute__((weak)) SceUID taiHookFunctionImportForUser(tai_hook_ref_t *p_hook, tai_hook_args_t *args);
 
 static tai_hook_ref_t g_hook_init_opts;
 static tai_hook_ref_t g_hook_compile;
