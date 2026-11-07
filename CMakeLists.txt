@@ -158,6 +158,13 @@ if(IS_VITA_BUILD)
         LINK_FLAGS "-nostartfiles -Wl,-q -Wl,--export-dynamic"
     )
 
+    find_library(TAIHEN_STUB NAMES taihen_stub libtaihen_stub.a)
+    if(TAIHEN_STUB)
+        target_link_libraries(open-shacc-elf PRIVATE ${TAIHEN_STUB})
+    else()
+        target_link_libraries(open-shacc-elf PRIVATE taihen_stub)
+    endif()
+
     if(COMMAND vita_create_self)
         vita_create_self(open-shacc.suprx open-shacc-elf CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/module.yml)
     else()
