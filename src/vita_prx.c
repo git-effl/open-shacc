@@ -32,11 +32,11 @@ static tai_hook_ref_t g_hook_callbacks;
 static tai_hook_ref_t g_hook_ext;
 
 static void hook_shacc_imports(void) {
-    taiHookFunctionImport(&g_hook_init_opts, TAI_MAIN_MODULE_NAME, 0xA05BBEBB, 0x69B14B33, (const void*)sceShaccCgInitializeCompileOptions);
-    taiHookFunctionImport(&g_hook_compile, TAI_MAIN_MODULE_NAME, 0xA05BBEBB, 0x69CFFF7C, (const void*)sceShaccCgCompileProgram);
-    taiHookFunctionImport(&g_hook_allocator, TAI_MAIN_MODULE_NAME, 0xA05BBEBB, 0x3266175D, (const void*)sceShaccCgSetDefaultAllocator);
-    taiHookFunctionImport(&g_hook_callbacks, TAI_MAIN_MODULE_NAME, 0xA05BBEBB, 0x0EB75865, (const void*)sceShaccCgInitializeCallbackList);
-    taiHookFunctionImport(&g_hook_ext, TAI_MAIN_MODULE_NAME, 0xA05BBEBB, 0xD748B49E, (const void*)sceShaccCgExtEnableExtensions);
+    taiHookFunctionImport(&g_hook_init_opts, TAI_MAIN_MODULE, 0xA05BBEBB, 0x69B14B33, (const void*)(uintptr_t)sceShaccCgInitializeCompileOptions);
+    taiHookFunctionImport(&g_hook_compile, TAI_MAIN_MODULE, 0xA05BBEBB, 0x69CFFF7C, (const void*)(uintptr_t)sceShaccCgCompileProgram);
+    taiHookFunctionImport(&g_hook_allocator, TAI_MAIN_MODULE, 0xA05BBEBB, 0x3266175D, (const void*)(uintptr_t)sceShaccCgSetDefaultAllocator);
+    taiHookFunctionImport(&g_hook_callbacks, TAI_MAIN_MODULE, 0xA05BBEBB, 0x0EB75865, (const void*)(uintptr_t)sceShaccCgInitializeCallbackList);
+    taiHookFunctionImport(&g_hook_ext, TAI_MAIN_MODULE, 0xA05BBEBB, 0xD748B49E, (const void*)(uintptr_t)sceShaccCgExtEnableExtensions);
 }
 #endif
 
