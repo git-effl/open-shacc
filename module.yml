@@ -3,8 +3,6 @@ SceShaccCg:
   version:
     major: 1
     minor: 0
-  nid: 0x89E5BDCB
-  modid: 0x89E5BDCB
   main:
     start: module_start
     stop: module_stop
