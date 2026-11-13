@@ -147,6 +147,5 @@ All sections are padded to 16-byte boundaries:
 
 ## License
 
-- `open-shacc` is licensed under the permissive [MIT License](LICENSE).
-- `open-shacc` contains code from [Vita3K](https://github.com/Vita3K/Vita3K),licensed under [GPL 2.0](COPYING.txt)
+`open-shacc` is licensed under the [GNU General Public License 2.0](LICENSE).
 
