@@ -1,6 +1,6 @@
 # open-shacc
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL 2.0](https://img.shields.io/badge/License-GPL2-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![Clean-Room](https://img.shields.io/badge/Clean--Room-Certified-green.svg)](#clean-room-statement)
 
