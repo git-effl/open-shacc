@@ -9,6 +9,7 @@
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include <cstdint>
 #include <string>
 
 static int g_tests_passed = 0;
@@ -22,6 +23,24 @@ static int g_tests_failed = 0;
             return; \
         } \
     } while(0)
+
+static uint32_t read_u32(const uint8_t* base, size_t off) {
+    uint32_t v = 0;
+    std::memcpy(&v, base + off, sizeof(v));
+    return v;
+}
+
+static int32_t read_i32(const uint8_t* base, size_t off) {
+    int32_t v = 0;
+    std::memcpy(&v, base + off, sizeof(v));
+    return v;
+}
+
+static uint16_t read_u16(const uint8_t* base, size_t off) {
+    uint16_t v = 0;
+    std::memcpy(&v, base + off, sizeof(v));
+    return v;
+}
 
 void test_version() {
     const char* ver = SceShaccCgGetVersion();
@@ -64,19 +83,28 @@ void test_basic_mvp_shader() {
     char* log = nullptr;
 
     int res = SceShaccCgCompileProgram(shader_code, OPEN_SHACC_OPT_VERBOSE_DISASSEMBLY, nullptr, &bin, &size, &log);
-
     if (log) {
         SceShaccCgDestroyDiagnosticLog(log);
     }
 
     TEST_ASSERT(res == OPEN_SHACC_SUCCESS, "Compilation should succeed for MVP vertex shader");
     TEST_ASSERT(bin != nullptr, "Binary buffer must not be null");
-    TEST_ASSERT(size > 0, "Binary size must be greater than zero");
+    TEST_ASSERT(size >= 0x9C, "Binary size must fit SceGxmProgram header");
     TEST_ASSERT(size % 16 == 0, "Container size must be 16-byte aligned");
 
-    // Verify GXP magic
-    const char* magic = static_cast<const char*>(bin);
-    TEST_ASSERT(magic[0] == 'G' && magic[1] == 'X' && magic[2] == 'P' && magic[3] == 0, "Magic must be 'GXP\\0'");
+    const auto* bytes = static_cast<const uint8_t*>(bin);
+    TEST_ASSERT(read_u32(bytes, 0x00) == 0x00505847u, "Magic must be 'GXP\\0'");
+    TEST_ASSERT(read_u32(bytes, 0x08) == size, "SceGxmProgram size field must match buffer size");
+    TEST_ASSERT(read_u32(bytes, 0x14) == 0u, "Vertex shader program_flags must not have fragment bit");
+    TEST_ASSERT(read_u32(bytes, 0x24) == 4u, "Should emit 2 uniforms + 2 vertex attributes");
+    TEST_ASSERT(read_i32(bytes, 0x2C) == (0x9C - 0x2C), "varyings_offset must point directly after header");
+    TEST_ASSERT(read_u16(bytes, 0x30) >= 1, "primary_reg_count >= 1");
+    TEST_ASSERT(read_u16(bytes, 0x34) >= 1, "temp_reg_count1 >= 1");
+    TEST_ASSERT(read_u32(bytes, 0x3C) >= 5u, "Expected matrix mul + uv + tint + PHAS instructions");
+    const int32_t ucode_rel = read_i32(bytes, 0x40);
+    TEST_ASSERT(((0x40 + ucode_rel) % 8) == 0, "Primary microcode must be 8-byte aligned");
+    TEST_ASSERT(read_u32(bytes, 0x64) == 20u, "float4x4 + float4 = 20 uniform words");
+    TEST_ASSERT(read_u32(bytes, 0x90) == 1u, "container_count must be 1 for default UB");
 
     SceShaccCgDestroyProgram(bin);
     g_tests_passed++;
@@ -102,13 +130,14 @@ void test_sceshacccg_abi_and_reflection() {
     const SceShaccCgCompileOutput* output = sceShaccCgCompileProgram(&opts, nullptr, 0);
     TEST_ASSERT(output != nullptr, "sceShaccCgCompileProgram must return non-null output");
     TEST_ASSERT(output->programData != nullptr, "programData must not be null");
-    TEST_ASSERT(output->programSize > 0, "programSize must be > 0");
+    TEST_ASSERT(output->programSize >= 0x9C, "programSize must fit SceGxmProgram");
+    TEST_ASSERT((read_u32(output->programData, 0x14) & 1u) == 1u, "Fragment shader flag bit 0 must be set");
 
-    // Test parameter reflection queries
     SceShaccCgParameter p_mvp = sceShaccCgGetParameterByName(output, "u_MVPMatrix");
     TEST_ASSERT(p_mvp != nullptr, "Should find u_MVPMatrix uniform parameter");
     TEST_ASSERT(sceShaccCgGetParameterClass(p_mvp) == SCE_SHACCCG_PARAMETERCLASS_MATRIX, "u_MVPMatrix must be matrix class");
     TEST_ASSERT(sceShaccCgGetParameterRows(p_mvp) == 4, "u_MVPMatrix rows must be 4");
+    TEST_ASSERT(sceShaccCgGetParameterBufferIndex(p_mvp) == 14, "Uniform buffer index must be 14");
 
     SceShaccCgParameter p_samp = sceShaccCgGetParameterByName(output, "texSampler");
     TEST_ASSERT(p_samp != nullptr, "Should find texSampler parameter");
@@ -121,6 +150,61 @@ void test_sceshacccg_abi_and_reflection() {
 
     g_tests_passed++;
     std::cout << "  [PASS] test_sceshacccg_abi_and_reflection\n";
+}
+
+void test_vitagl_style_shader_and_preprocessor() {
+    const char* shader_code = R"(
+        #define num_textures 2
+        #define lighting 1
+        #define shading_mode 0 // flat
+
+        #if lighting == 1 && shading_mode < 1
+        void main(
+            float3 position : POSITION,
+            float2 uv : TEXCOORD0,
+            uniform float4x4 Jwvp,
+            uniform sampler2D tex[num_textures],
+            float4 out vPosition : POSITION,
+            float2 out vUv : TEXCOORD0
+        ) {
+            const float scale = 1.0f;
+            float4 pos = float4(position, scale);
+            vPosition = mul(Jwvp, pos);
+            vUv = uv;
+        }
+        #else
+        void main(float4 position : POSITION, float4 out vPosition : POSITION) {
+            vPosition = position;
+        }
+        #endif
+    )";
+
+    SceShaccCgCompileOptions opts;
+    sceShaccCgInitializeCompileOptions(&opts);
+    opts.mainSourceFile = shader_code;
+    opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+
+    const SceShaccCgCompileOutput* output = sceShaccCgCompileProgram(&opts, nullptr, 0);
+    TEST_ASSERT(output != nullptr && output->programData != nullptr, "vitaGL-style shader must compile");
+
+    SceShaccCgParameter p_wvp = sceShaccCgGetParameterByName(output, "Jwvp");
+    TEST_ASSERT(p_wvp != nullptr, "uniform float4x4 Jwvp inside main() must be reflected as UNIFORM");
+    TEST_ASSERT(sceShaccCgGetParameterVariability(p_wvp) == SCE_SHACCCG_VARIABILITY_UNIFORM, "Jwvp must be UNIFORM");
+    TEST_ASSERT(sceShaccCgGetParameterBufferIndex(p_wvp) == 14, "Jwvp buffer index must be 14");
+
+    SceShaccCgParameter p_tex = sceShaccCgGetParameterByName(output, "tex");
+    TEST_ASSERT(p_tex != nullptr, "uniform sampler2D tex[2] inside main() must be reflected");
+    TEST_ASSERT(sceShaccCgGetParameterClass(p_tex) == SCE_SHACCCG_PARAMETERCLASS_SAMPLER, "tex must be SAMPLER");
+    TEST_ASSERT(sceShaccCgGetArraySize(p_tex) == 2, "tex array size must equal 2");
+
+    SceShaccCgParameter p_vpos = sceShaccCgGetParameterByName(output, "vPosition");
+    TEST_ASSERT(p_vpos != nullptr, "out parameter vPosition must be reflected");
+    TEST_ASSERT(sceShaccCgGetParameterDirection(p_vpos) == SCE_SHACCCG_DIRECTION_OUT, "vPosition must be DIRECTION_OUT");
+
+    sceShaccCgDestroyCompileOutput(output);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_vitagl_style_shader_and_preprocessor\n";
 }
 
 void test_dot_product_lighting() {
@@ -178,6 +262,7 @@ int main() {
     test_version();
     test_basic_mvp_shader();
     test_sceshacccg_abi_and_reflection();
+    test_vitagl_style_shader_and_preprocessor();
     test_dot_product_lighting();
     test_syntax_error_handling();
 

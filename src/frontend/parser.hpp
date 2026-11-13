@@ -42,12 +42,16 @@ public:
 
 private:
     const Token& peek() const;
+    const Token& peek_next(size_t offset = 1) const;
     const Token& previous() const;
     bool is_at_end() const;
     const Token& advance();
     bool check(TokenType type) const;
     bool match(TokenType type);
     const Token& consume(TokenType type, const std::string& error_message);
+
+    static bool is_type_token(TokenType type);
+    static bool is_value_type_token(TokenType type);
 
     void error(const Token& tok, const std::string& message);
 
@@ -58,6 +62,7 @@ private:
     void parse_function_or_global(TranslationUnit& tu, DataType type, const std::string& name);
 
     DataType parse_type();
+    uint32_t parse_array_dimension();
     std::string parse_optional_semantic();
 
     // Statement parsers
@@ -66,7 +71,10 @@ private:
     StmtPtr parse_return_statement();
     StmtPtr parse_if_statement();
     StmtPtr parse_for_statement();
+    StmtPtr parse_while_statement();
+    StmtPtr parse_do_while_statement();
     StmtPtr parse_var_decl_or_assign();
+    StmtPtr parse_expr_or_assign_stmt();
 
     // Expression parsers
     ExprPtr parse_expression();

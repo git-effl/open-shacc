@@ -22,13 +22,19 @@ enum class TokenType {
     StringLiteral,
 
     // Keywords
-    KwStruct, KwUniform, KwConst, KwVarying,
+    KwStruct, KwUniform, KwConst, KwVarying, KwStatic, KwUnsigned, KwSigned,
     KwIn, KwOut, KwInOut, KwInline,
-    KwReturn, KwDiscard, KwIf, KwElse, KwFor, KwWhile,
-    KwVoid, KwBool, KwInt, KwShort, KwUShort, KwChar, KwUChar,
+    KwReturn, KwDiscard, KwIf, KwElse, KwFor, KwWhile, KwDo, KwBreak, KwContinue,
+    KwVoid, KwBool, KwBool2, KwBool3, KwBool4,
+    KwInt, KwInt2, KwInt3, KwInt4,
+    KwUInt, KwUInt2, KwUInt3, KwUInt4,
+    KwShort, KwShort2, KwShort3, KwShort4,
+    KwUShort, KwUShort2, KwUShort3, KwUShort4,
+    KwChar, KwUChar,
     KwFloat, KwFloat2, KwFloat3, KwFloat4, KwFloat2x2, KwFloat3x3, KwFloat4x4,
     KwHalf, KwHalf2, KwHalf3, KwHalf4, KwHalf2x2, KwHalf3x3, KwHalf4x4,
-    KwFixed, KwSampler2D, KwSamplerCube,
+    KwFixed, KwFixed2, KwFixed3, KwFixed4,
+    KwSampler1D, KwSampler2D, KwSampler3D, KwSamplerCube,
 
     // Symbols & Operators
     OpenParen,       // (

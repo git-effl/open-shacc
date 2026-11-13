@@ -1,6 +1,6 @@
 /**
  * @file usse_codegen.hpp
- * @brief USSE Target Code Generator translating AST to 32-bit microcode words.
+ * @brief USSE Target Code Generator translating AST to 64-bit microcode words.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -13,35 +13,47 @@
 #include "../frontend/ast.hpp"
 #include <vector>
 #include <string>
-#include <memory>
+#include <optional>
+#include <unordered_map>
 
 namespace open_shacc::backend {
 
 struct CompiledProgram {
     std::vector<UsseInstruction> instructions;
-    std::vector<uint32_t> microcode_words;
+    std::vector<uint64_t> microcode_words;
     std::string disassembly;
     std::vector<SymbolBinding> uniforms;
     std::vector<SymbolBinding> samplers;
     std::vector<SymbolBinding> inputs;
     std::vector<SymbolBinding> outputs;
     uint8_t temp_register_count = 0;
-    uint8_t const_register_count = 0;
+    uint16_t const_register_count = 0;
+    uint8_t input_register_count = 0;
     bool is_vertex_shader = true;
+    bool uses_discard = false;
 };
 
 class UsseCodeGenerator {
 public:
     UsseCodeGenerator();
 
-    bool generate(const frontend::TranslationUnit& tu, CompiledProgram& out_program);
+    bool generate(
+        const frontend::TranslationUnit& tu,
+        const std::string& entry_name,
+        std::optional<bool> force_fragment,
+        CompiledProgram& out_program
+    );
+
+    bool generate(const frontend::TranslationUnit& tu, CompiledProgram& out_program) {
+        return generate(tu, "main", std::nullopt, out_program);
+    }
+
     [[nodiscard]] const std::string& get_error_message() const { return error_message_; }
 
 private:
-    void emit(UsseOpcode op, HardwareRegister dst, HardwareRegister src0, HardwareRegister src1, const std::string& comment = "");
-    void emit(UsseOpcode op, HardwareRegister dst, HardwareRegister src0, HardwareRegister src1, HardwareRegister src2, const std::string& comment = "");
+    void emit(UsseOpcode op, HardwareRegister dst, HardwareRegister src0, HardwareRegister src1, uint8_t mask = 0xF, const std::string& comment = "");
+    void emit(UsseOpcode op, HardwareRegister dst, HardwareRegister src0, HardwareRegister src1, HardwareRegister src2, uint8_t mask = 0xF, const std::string& comment = "");
     void emit_phase_switch();
-    void emit_halt();
 
     // Expression code generation returning hardware register
     HardwareRegister generate_expression(const frontend::Expression* expr);
@@ -50,8 +62,10 @@ private:
     // Specific expressions
     HardwareRegister generate_binary_op(const frontend::BinaryExpr* bin);
     HardwareRegister generate_unary_op(const frontend::UnaryExpr* un);
+    HardwareRegister generate_ternary(const frontend::TernaryExpr* tern);
     HardwareRegister generate_call(const frontend::CallExpr* call);
     HardwareRegister generate_swizzle(const frontend::SwizzleExpr* swiz);
+    HardwareRegister generate_array_access(const frontend::ArrayAccessExpr* arr);
     HardwareRegister generate_variable(const frontend::VariableExpr* var);
     HardwareRegister generate_literal(const frontend::LiteralExpr* lit);
 
@@ -63,6 +77,8 @@ private:
     void generate_return(const frontend::ReturnStmt* ret);
     void generate_if(const frontend::IfStmt* if_stmt);
     void generate_for(const frontend::ForStmt* for_stmt);
+    void generate_while(const frontend::WhileStmt* while_stmt);
+    void generate_do_while(const frontend::DoWhileStmt* dw_stmt);
     void generate_discard(const frontend::DiscardStmt* discard_stmt);
 
     // Matrix multiply helper
@@ -76,6 +92,8 @@ private:
     std::string error_message_;
     const frontend::TranslationUnit* tu_ = nullptr;
     const frontend::FunctionDecl* current_fn_ = nullptr;
+    std::vector<SymbolBinding> return_struct_fields_;
+    bool uses_discard_ = false;
 };
 
 } // namespace open_shacc::backend

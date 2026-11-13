@@ -12,58 +12,105 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward declarations of SceShaccCg C functions */
-extern int sceShaccCgInitializeCompileOptions(void *options);
-extern void *sceShaccCgCompileProgram(const void *options, const void *callbacks, int unk);
-extern int sceShaccCgSetDefaultAllocator(void *(*malloc_cb)(unsigned int), void (*free_cb)(void *));
-extern void sceShaccCgInitializeCallbackList(void *callbacks, int defaults);
-extern void sceShaccCgDestroyCompileOutput(const void *output);
-extern void sceShaccCgReleaseCompiler(void);
-extern const char *sceShaccCgGetVersionString(void);
-extern int sceShaccCgExtEnableExtensions(void);
+/* Reserve a compact 4 MiB heap for PRX shader compilation instead of newlib's 128 MiB default */
+unsigned int _newlib_heap_size_user = 4 * 1024 * 1024;
 
-#if __has_include(<taihen.h>)
-#include <taihen.h>
+/* VitaSDK newlib internal init/cleanup functions */
+extern void _init_vita_heap(void);
+extern void _free_vita_heap(void);
+extern void _init_vita_malloc(void);
+extern void _free_vita_malloc(void);
+extern void _init_vita_reent(void);
+extern void _free_vita_reent(void);
+__attribute__((weak)) extern void *sceKernelGetTLSAddr(int key);
 
-/* Weak symbol declaration matching taihen.h so linking succeeds whether or not taihen_stub is linked */
-__attribute__((weak)) SceUID taiHookFunctionImportForUser(tai_hook_ref_t *p_hook, tai_hook_args_t *args);
-
-static tai_hook_ref_t g_hook_init_opts;
-static tai_hook_ref_t g_hook_compile;
-static tai_hook_ref_t g_hook_allocator;
-static tai_hook_ref_t g_hook_callbacks;
-static tai_hook_ref_t g_hook_ext;
-
-static void hook_shacc_imports(void) {
-    if (&taiHookFunctionImportForUser != NULL) {
-        taiHookFunctionImport(&g_hook_init_opts, TAI_MAIN_MODULE, 0xA05BBEBB, 0x69B14B33, (const void*)(uintptr_t)sceShaccCgInitializeCompileOptions);
-        taiHookFunctionImport(&g_hook_compile, TAI_MAIN_MODULE, 0xA05BBEBB, 0x69CFFF7C, (const void*)(uintptr_t)sceShaccCgCompileProgram);
-        taiHookFunctionImport(&g_hook_allocator, TAI_MAIN_MODULE, 0xA05BBEBB, 0x3266175D, (const void*)(uintptr_t)sceShaccCgSetDefaultAllocator);
-        taiHookFunctionImport(&g_hook_callbacks, TAI_MAIN_MODULE, 0xA05BBEBB, 0x0EB75865, (const void*)(uintptr_t)sceShaccCgInitializeCallbackList);
-        taiHookFunctionImport(&g_hook_ext, TAI_MAIN_MODULE, 0xA05BBEBB, 0xD748B49E, (const void*)(uintptr_t)sceShaccCgExtEnableExtensions);
-    }
-}
-#endif
+/* Linker-provided C++ constructor/destructor arrays */
+typedef void (*init_fn_t)(void);
+__attribute__((weak)) extern init_fn_t __preinit_array_start[];
+__attribute__((weak)) extern init_fn_t __preinit_array_end[];
+__attribute__((weak)) extern init_fn_t __init_array_start[];
+__attribute__((weak)) extern init_fn_t __init_array_end[];
+__attribute__((weak)) extern init_fn_t __fini_array_start[];
+__attribute__((weak)) extern init_fn_t __fini_array_end[];
 
 /* Provided for C++ runtime destructors when linking with -nostartfiles */
 __attribute__((visibility("hidden"))) void* __dso_handle = &__dso_handle;
 
+static int g_prx_initialized = 0;
+
+static void run_init_arrays(void) {
+    if (__preinit_array_start && __preinit_array_end) {
+        size_t count = (size_t)(__preinit_array_end - __preinit_array_start);
+        for (size_t i = 0; i < count; ++i) {
+            if (__preinit_array_start[i]) {
+                __preinit_array_start[i]();
+            }
+        }
+    }
+    if (__init_array_start && __init_array_end) {
+        size_t count = (size_t)(__init_array_end - __init_array_start);
+        for (size_t i = 0; i < count; ++i) {
+            if (__init_array_start[i]) {
+                __init_array_start[i]();
+            }
+        }
+    }
+}
+
+static void run_fini_arrays(void) {
+    if (__fini_array_start && __fini_array_end) {
+        size_t count = (size_t)(__fini_array_end - __fini_array_start);
+        for (size_t i = count; i > 0; --i) {
+            if (__fini_array_start[i - 1]) {
+                __fini_array_start[i - 1]();
+            }
+        }
+    }
+}
+
 /* Referenced by newlib libc exit routines in PRX mode */
-void _free_vita_newlib(void) {}
+void _free_vita_newlib(void) {
+    if (!g_prx_initialized) return;
+    _free_vita_malloc();
+    _free_vita_reent();
+    _free_vita_heap();
+    g_prx_initialized = 0;
+}
 
 /* Module lifecycle hooks defined in module.yml */
 __attribute__((visibility("default"))) int module_start(size_t argc, const void* args) {
     (void)argc;
     (void)args;
-#if __has_include(<taihen.h>)
-    hook_shacc_imports();
-#endif
+
+    if (!g_prx_initialized) {
+        void **tls_slot = (&sceKernelGetTLSAddr != NULL) ? (void **)sceKernelGetTLSAddr(0x89) : NULL;
+        void *saved_reent = tls_slot ? *tls_slot : NULL;
+
+        _init_vita_heap();
+        _init_vita_reent();
+        _init_vita_malloc();
+
+        /* Do not clobber the host application's TLS _reent pointer if already set */
+        if (tls_slot && saved_reent) {
+            *tls_slot = saved_reent;
+        }
+
+        run_init_arrays();
+        g_prx_initialized = 1;
+    }
+
     return 0; /* SCE_KERNEL_START_SUCCESS */
 }
 
 __attribute__((visibility("default"))) int module_stop(size_t argc, const void* args) {
     (void)argc;
     (void)args;
+
+    if (g_prx_initialized) {
+        run_fini_arrays();
+        _free_vita_newlib();
+    }
+
     return 0; /* SCE_KERNEL_STOP_SUCCESS */
 }
 

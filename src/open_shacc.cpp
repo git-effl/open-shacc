@@ -20,8 +20,10 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <deque>
 #include <memory>
-#include <unordered_map>
+#include <optional>
+#include <algorithm>
 
 // Global allocator callbacks
 static void* (*g_malloc_cb)(unsigned int) = nullptr;
@@ -62,7 +64,7 @@ struct InternalParameter {
     uint32_t rows = 1;
     uint32_t columns = 1;
     uint32_t vector_width = 1;
-    uint32_t array_size = 0;
+    uint32_t array_size = 1;
     bool is_referenced = true;
     bool is_reg_format = true;
 
@@ -74,47 +76,43 @@ struct InternalParameter {
 
 // Internal Compile Output wrapper
 struct InternalCompileOutput {
-    SceShaccCgCompileOutput public_output;
+    SceShaccCgCompileOutput public_output{};
     std::vector<uint8_t> program_buffer;
     std::vector<SceShaccCgDiagnosticMessage> diagnostics_list;
-    std::vector<std::string> message_strings;
+    std::deque<std::string> message_strings;
     std::vector<std::unique_ptr<InternalParameter>> parameters;
     InternalParameter* first_param = nullptr;
 };
 
 static SceShaccCgParameterBaseType data_type_to_base_type(const open_shacc::frontend::DataType& dt) {
+    using open_shacc::frontend::BaseType;
     if (dt.is_sampler()) {
-        if (dt.base == open_shacc::frontend::BaseType::Sampler2D) return SCE_SHACCCG_BASETYPE_SAMPLER2D;
-        if (dt.base == open_shacc::frontend::BaseType::SamplerCube) return SCE_SHACCCG_BASETYPE_SAMPLERCUBE;
+        if (dt.base == BaseType::Sampler1D) return SCE_SHACCCG_BASETYPE_SAMPLER1D;
+        if (dt.base == BaseType::SamplerCube) return SCE_SHACCCG_BASETYPE_SAMPLERCUBE;
         return SCE_SHACCCG_BASETYPE_SAMPLER2D;
     }
     switch (dt.base) {
-        case open_shacc::frontend::BaseType::Float:
-        case open_shacc::frontend::BaseType::Float2:
-        case open_shacc::frontend::BaseType::Float3:
-        case open_shacc::frontend::BaseType::Float4:
-        case open_shacc::frontend::BaseType::Float2x2:
-        case open_shacc::frontend::BaseType::Float3x3:
-        case open_shacc::frontend::BaseType::Float4x4:
+        case BaseType::Float: case BaseType::Float2: case BaseType::Float3: case BaseType::Float4:
+        case BaseType::Float2x2: case BaseType::Float3x3: case BaseType::Float4x4:
             return SCE_SHACCCG_BASETYPE_FLOAT;
-        case open_shacc::frontend::BaseType::Half:
-        case open_shacc::frontend::BaseType::Half2:
-        case open_shacc::frontend::BaseType::Half3:
-        case open_shacc::frontend::BaseType::Half4:
+        case BaseType::Half: case BaseType::Half2: case BaseType::Half3: case BaseType::Half4:
+        case BaseType::Half2x2: case BaseType::Half3x3: case BaseType::Half4x4:
             return SCE_SHACCCG_BASETYPE_HALF;
-        case open_shacc::frontend::BaseType::Fixed:
+        case BaseType::Fixed: case BaseType::Fixed2: case BaseType::Fixed3: case BaseType::Fixed4:
             return SCE_SHACCCG_BASETYPE_FIXED;
-        case open_shacc::frontend::BaseType::Int:
+        case BaseType::Int: case BaseType::Int2: case BaseType::Int3: case BaseType::Int4:
             return SCE_SHACCCG_BASETYPE_INT;
-        case open_shacc::frontend::BaseType::Short:
+        case BaseType::UInt: case BaseType::UInt2: case BaseType::UInt3: case BaseType::UInt4:
+            return SCE_SHACCCG_BASETYPE_UINT;
+        case BaseType::Short: case BaseType::Short2: case BaseType::Short3: case BaseType::Short4:
             return SCE_SHACCCG_BASETYPE_SHORT;
-        case open_shacc::frontend::BaseType::UShort:
+        case BaseType::UShort: case BaseType::UShort2: case BaseType::UShort3: case BaseType::UShort4:
             return SCE_SHACCCG_BASETYPE_USHORT;
-        case open_shacc::frontend::BaseType::Char:
+        case BaseType::Char:
             return SCE_SHACCCG_BASETYPE_CHAR;
-        case open_shacc::frontend::BaseType::UChar:
+        case BaseType::UChar:
             return SCE_SHACCCG_BASETYPE_UCHAR;
-        case open_shacc::frontend::BaseType::Bool:
+        case BaseType::Bool: case BaseType::Bool2: case BaseType::Bool3: case BaseType::Bool4:
             return SCE_SHACCCG_BASETYPE_BOOL;
         default:
             return SCE_SHACCCG_BASETYPE_FLOAT;
@@ -123,15 +121,55 @@ static SceShaccCgParameterBaseType data_type_to_base_type(const open_shacc::fron
 
 static SceShaccCgParameterClass data_type_to_class(const open_shacc::frontend::DataType& dt) {
     if (dt.is_sampler()) return SCE_SHACCCG_PARAMETERCLASS_SAMPLER;
-    if (dt.base == open_shacc::frontend::BaseType::Float4x4 ||
-        dt.base == open_shacc::frontend::BaseType::Float3x3 ||
-        dt.base == open_shacc::frontend::BaseType::Float2x2) {
-        return SCE_SHACCCG_PARAMETERCLASS_MATRIX;
-    }
-    if (dt.component_count() > 1) {
-        return SCE_SHACCCG_PARAMETERCLASS_VECTOR;
-    }
+    if (dt.is_matrix()) return SCE_SHACCCG_PARAMETERCLASS_MATRIX;
+    if (dt.component_count() > 1) return SCE_SHACCCG_PARAMETERCLASS_VECTOR;
     return SCE_SHACCCG_PARAMETERCLASS_SCALAR;
+}
+
+static void fill_dimensions(InternalParameter* param, const open_shacc::frontend::DataType& dt) {
+    if (dt.is_matrix()) {
+        param->rows = static_cast<uint32_t>(dt.matrix_rows());
+        param->columns = static_cast<uint32_t>(dt.matrix_cols());
+        param->vector_width = param->columns;
+    } else if (dt.is_sampler()) {
+        param->rows = 1;
+        param->columns = 1;
+        param->vector_width = 1;
+    } else {
+        param->rows = 1;
+        param->columns = static_cast<uint32_t>(std::max<size_t>(1, dt.component_count()));
+        param->vector_width = param->columns;
+    }
+    param->array_size = (dt.array_size > 1) ? dt.array_size : 1u;
+}
+
+static void append_parameter(InternalCompileOutput* out, InternalParameter*& prev, std::unique_ptr<InternalParameter> param) {
+    if (prev) {
+        prev->next = param.get();
+    } else {
+        out->first_param = param.get();
+    }
+    prev = param.get();
+    out->parameters.push_back(std::move(param));
+}
+
+static const SceShaccCgCompileOutput* make_error_output(
+    std::unique_ptr<InternalCompileOutput> out,
+    uint32_t code,
+    const std::string& message
+) {
+    out->message_strings.push_back(message);
+    SceShaccCgDiagnosticMessage msg{};
+    msg.level = SCE_SHACCCG_DIAGNOSTIC_LEVEL_ERROR;
+    msg.code = code;
+    msg.message = out->message_strings.back().c_str();
+    out->diagnostics_list.push_back(msg);
+
+    out->public_output.programData = nullptr;
+    out->public_output.programSize = 0;
+    out->public_output.diagnosticCount = static_cast<int32_t>(out->diagnostics_list.size());
+    out->public_output.diagnostics = out->diagnostics_list.data();
+    return &out.release()->public_output;
 }
 
 extern "C" {
@@ -156,13 +194,15 @@ OPEN_SHACC_API int sceShaccCgSetDefaultAllocator(void *(*malloc_cb)(unsigned int
     return OPEN_SHACC_SUCCESS;
 }
 
-OPEN_SHACC_API void sceShaccCgInitializeCallbackList(SceShaccCgCallbackList *callbacks, SceShaccCgCallbackDefaults defaults) {
+OPEN_SHACC_API void sceShaccCgInitializeCallbackList(
+    SceShaccCgCallbackList *callbacks,
+    [[maybe_unused]] SceShaccCgCallbackDefaults defaults
+) {
     if (!callbacks) return;
     std::memset(callbacks, 0, sizeof(SceShaccCgCallbackList));
 }
 
 OPEN_SHACC_API void sceShaccCgReleaseCompiler(void) {
-    // No-op for stateless compiler
 }
 
 OPEN_SHACC_API const char *sceShaccCgGetVersionString(void) {
@@ -182,36 +222,32 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
 
     auto out = std::make_unique<InternalCompileOutput>();
 
-    // Prepare source text via callbacks if provided, or read from options
-    std::string source_text = options->mainSourceFile;
+    // Prepare source text via openFile callback if provided
+    std::string source_text;
     std::string filename = "main.cg";
 
     if (callbacks && callbacks->openFile) {
         const char* err_str = nullptr;
         const SceShaccCgSourceFile* src_file = callbacks->openFile(options->mainSourceFile, nullptr, options, &err_str);
         if (src_file && src_file->text) {
-            source_text = std::string(src_file->text, src_file->size ? src_file->size : std::strlen(src_file->text));
+            source_text.assign(src_file->text, src_file->size ? src_file->size : std::strlen(src_file->text));
             if (src_file->fileName) filename = src_file->fileName;
+            if (callbacks->releaseFile) {
+                callbacks->releaseFile(src_file, options);
+            }
+        } else {
+            if (src_file && callbacks->releaseFile) {
+                callbacks->releaseFile(src_file, options);
+            }
+            std::string err_msg = err_str ? err_str : (std::string("Failed to open source file: ") + options->mainSourceFile);
+            return make_error_output(std::move(out), 1000, err_msg);
         }
+    } else {
+        source_text = options->mainSourceFile;
     }
 
     // 1. C Preprocessor
     open_shacc::frontend::Preprocessor prep;
-    // Add macro definitions from compile options
-    if (options->macroDefinitions && options->macroDefinitionCount > 0) {
-        for (uint32_t i = 0; i < options->macroDefinitionCount; ++i) {
-            if (options->macroDefinitions[i]) {
-                std::string def = options->macroDefinitions[i];
-                size_t eq = def.find('=');
-                if (eq != std::string::npos) {
-                    prep.add_macro(def.substr(0, eq), def.substr(eq + 1));
-                } else {
-                    prep.add_macro(def, "1");
-                }
-            }
-        }
-    }
-
     std::string processed_source;
     std::string prep_diag;
     if (!prep.preprocess(source_text, filename, options, callbacks, processed_source, prep_diag)) {
@@ -226,65 +262,32 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
     open_shacc::frontend::TranslationUnit tu;
 
     if (!parser.parse(tu)) {
-        out->message_strings.push_back("Parsing failed: " + parser.get_diagnostics_string());
-        SceShaccCgDiagnosticMessage msg{};
-        msg.level = SCE_SHACCCG_DIAGNOSTIC_LEVEL_ERROR;
-        msg.code = 1001;
-        msg.message = out->message_strings.back().c_str();
-        out->diagnostics_list.push_back(msg);
-
-        out->public_output.programData = nullptr;
-        out->public_output.programSize = 0;
-        out->public_output.diagnosticCount = static_cast<int32_t>(out->diagnostics_list.size());
-        out->public_output.diagnostics = out->diagnostics_list.data();
-        return &out.release()->public_output;
+        return make_error_output(std::move(out), 1001, "Parsing failed: " + parser.get_diagnostics_string());
     }
 
-    // 3. Target Codegen & Register Allocation
+    // 3. Target Codegen & Register Allocation (respect targetProfile & entryFunctionName)
     open_shacc::backend::UsseCodeGenerator codegen;
     open_shacc::backend::CompiledProgram program;
 
-    if (!codegen.generate(tu, program)) {
-        out->message_strings.push_back("Codegen failed: " + codegen.get_error_message());
-        SceShaccCgDiagnosticMessage msg{};
-        msg.level = SCE_SHACCCG_DIAGNOSTIC_LEVEL_ERROR;
-        msg.code = 1002;
-        msg.message = out->message_strings.back().c_str();
-        out->diagnostics_list.push_back(msg);
+    std::string entry_name = (options->entryFunctionName && options->entryFunctionName[0] != '\0')
+                           ? options->entryFunctionName
+                           : "main";
+    std::optional<bool> force_fragment = (options->targetProfile == SCE_SHACCCG_PROFILE_FP);
 
-        out->public_output.programData = nullptr;
-        out->public_output.programSize = 0;
-        out->public_output.diagnosticCount = static_cast<int32_t>(out->diagnostics_list.size());
-        out->public_output.diagnostics = out->diagnostics_list.data();
-        return &out.release()->public_output;
+    if (!codegen.generate(tu, entry_name, force_fragment, program)) {
+        return make_error_output(std::move(out), 1002, "Codegen failed: " + codegen.get_error_message());
     }
 
-    // Set profile if explicitly specified
-    if (options->targetProfile == SCE_SHACCCG_PROFILE_FP) {
-        program.is_vertex_shader = false;
-    }
-
-    // 4. Pack into GXP Binary Container
+    // 4. Pack into SceGxmProgram (GXP) Binary Container
     open_shacc::packer::GxpEncoder encoder;
     if (!encoder.encode(program, out->program_buffer)) {
-        out->message_strings.push_back("GXP packaging failed: " + encoder.get_error_message());
-        SceShaccCgDiagnosticMessage msg{};
-        msg.level = SCE_SHACCCG_DIAGNOSTIC_LEVEL_ERROR;
-        msg.code = 1003;
-        msg.message = out->message_strings.back().c_str();
-        out->diagnostics_list.push_back(msg);
-
-        out->public_output.programData = nullptr;
-        out->public_output.programSize = 0;
-        out->public_output.diagnosticCount = static_cast<int32_t>(out->diagnostics_list.size());
-        out->public_output.diagnostics = out->diagnostics_list.data();
-        return &out.release()->public_output;
+        return make_error_output(std::move(out), 1003, "GXP packaging failed: " + encoder.get_error_message());
     }
 
     // 5. Populate Reflection Parameters Table
     InternalParameter* prev_param = nullptr;
 
-    // Uniforms
+    // Uniforms (Default uniform buffer container index = 14)
     for (const auto& u : program.uniforms) {
         auto param = std::make_unique<InternalParameter>();
         param->name = u.name;
@@ -294,32 +297,9 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
         param->variability = SCE_SHACCCG_VARIABILITY_UNIFORM;
         param->direction = SCE_SHACCCG_DIRECTION_IN;
         param->resource_index = u.base_register;
-
-        if (u.type.base == open_shacc::frontend::BaseType::Float4x4) {
-            param->rows = 4;
-            param->columns = 4;
-            param->vector_width = 4;
-        } else if (u.type.base == open_shacc::frontend::BaseType::Float3x3) {
-            param->rows = 3;
-            param->columns = 3;
-            param->vector_width = 3;
-        } else if (u.type.base == open_shacc::frontend::BaseType::Float2x2) {
-            param->rows = 2;
-            param->columns = 2;
-            param->vector_width = 2;
-        } else {
-            param->rows = 1;
-            param->columns = static_cast<uint32_t>(u.type.component_count());
-            param->vector_width = param->columns;
-        }
-
-        if (prev_param) {
-            prev_param->next = param.get();
-        } else {
-            out->first_param = param.get();
-        }
-        prev_param = param.get();
-        out->parameters.push_back(std::move(param));
+        param->buffer_index = 14;
+        fill_dimensions(param.get(), u.type);
+        append_parameter(out.get(), prev_param, std::move(param));
     }
 
     // Samplers
@@ -331,14 +311,9 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
         param->variability = SCE_SHACCCG_VARIABILITY_UNIFORM;
         param->direction = SCE_SHACCCG_DIRECTION_IN;
         param->resource_index = s.base_register;
-
-        if (prev_param) {
-            prev_param->next = param.get();
-        } else {
-            out->first_param = param.get();
-        }
-        prev_param = param.get();
-        out->parameters.push_back(std::move(param));
+        param->buffer_index = 0;
+        fill_dimensions(param.get(), s.type);
+        append_parameter(out.get(), prev_param, std::move(param));
     }
 
     // Inputs
@@ -351,16 +326,24 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
         param->variability = SCE_SHACCCG_VARIABILITY_VARYING;
         param->direction = SCE_SHACCCG_DIRECTION_IN;
         param->resource_index = in.base_register;
-        param->columns = static_cast<uint32_t>(in.type.component_count());
-        param->vector_width = param->columns;
+        param->buffer_index = 0;
+        fill_dimensions(param.get(), in.type);
+        append_parameter(out.get(), prev_param, std::move(param));
+    }
 
-        if (prev_param) {
-            prev_param->next = param.get();
-        } else {
-            out->first_param = param.get();
-        }
-        prev_param = param.get();
-        out->parameters.push_back(std::move(param));
+    // Outputs
+    for (const auto& out_sym : program.outputs) {
+        auto param = std::make_unique<InternalParameter>();
+        param->name = out_sym.name;
+        param->semantic = out_sym.semantic;
+        param->param_class = data_type_to_class(out_sym.type);
+        param->base_type = data_type_to_base_type(out_sym.type);
+        param->variability = SCE_SHACCCG_VARIABILITY_VARYING;
+        param->direction = SCE_SHACCCG_DIRECTION_OUT;
+        param->resource_index = out_sym.base_register;
+        param->buffer_index = 0;
+        fill_dimensions(param.get(), out_sym.type);
+        append_parameter(out.get(), prev_param, std::move(param));
     }
 
     out->public_output.programData = out->program_buffer.data();
@@ -485,7 +468,10 @@ OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetArrayParameter(SceShaccCgParamet
     return nullptr;
 }
 
-OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetRowParameter(SceShaccCgParameter parameter, uint32_t row) {
+OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetRowParameter(
+    [[maybe_unused]] SceShaccCgParameter parameter,
+    [[maybe_unused]] uint32_t row
+) {
     return nullptr;
 }
 
@@ -498,7 +484,7 @@ OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetFirstStructParameter(SceShaccCgP
     return nullptr;
 }
 
-OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetFirstUniformBlockParameter(SceShaccCgParameter parameter) {
+OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetFirstUniformBlockParameter([[maybe_unused]] SceShaccCgParameter parameter) {
     return nullptr;
 }
 
@@ -508,7 +494,7 @@ OPEN_SHACC_API const char *sceShaccCgGetParameterSemantic(SceShaccCgParameter pa
     return param->semantic.c_str();
 }
 
-OPEN_SHACC_API const char *sceShaccCgGetParameterUserType(SceShaccCgParameter parameter) {
+OPEN_SHACC_API const char *sceShaccCgGetParameterUserType([[maybe_unused]] SceShaccCgParameter parameter) {
     return "";
 }
 
@@ -524,15 +510,15 @@ OPEN_SHACC_API int sceShaccCgIsParameterRegFormat(SceShaccCgParameter parameter)
     return param->is_reg_format ? 1 : 0;
 }
 
-OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecision(SceShaccCgParameter parameter) {
+OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecision([[maybe_unused]] SceShaccCgParameter parameter) {
     return 0;
 }
 
-OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecisionCount(SceShaccCgParameter parameter) {
+OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecisionCount([[maybe_unused]] SceShaccCgParameter parameter) {
     return 0;
 }
 
-OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatWidth(SceShaccCgParameter parameter) {
+OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatWidth([[maybe_unused]] SceShaccCgParameter parameter) {
     return 0;
 }
 
@@ -542,7 +528,7 @@ OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatWidth(SceShaccCgParameter
 
 OPEN_SHACC_API int SceShaccCgCompileProgram(
     const char* source_code,
-    [[maybe_unused]] uint32_t options,
+    uint32_t options,
     [[maybe_unused]] const void* compile_options,
     void** out_program_binary,
     size_t* out_size,
@@ -562,7 +548,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     }
 
     std::ostringstream diag_stream;
-    diag_stream << "open-shacc v1.0.0 (Clean-room Cg/HLSL to USSE compiler)\n";
+    diag_stream << "open-shacc v1.0.0 (Clean-room C++20 USSE/GXP Shader Compiler)\n";
 
     // 1. C Preprocessor
     open_shacc::frontend::Preprocessor preprocessor;
@@ -606,7 +592,7 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
     }
 
     diag_stream << "[INFO] Generated " << program.instructions.size() << " USSE instructions ("
-                << program.microcode_words.size() * 4 << " bytes microcode)\n";
+                << program.microcode_words.size() * sizeof(uint64_t) << " bytes microcode)\n";
     diag_stream << "[INFO] Allocated registers: "
                 << static_cast<int>(program.temp_register_count) << " temps, "
                 << static_cast<int>(program.const_register_count) << " constants\n";
@@ -623,7 +609,6 @@ OPEN_SHACC_API int SceShaccCgCompileProgram(
         return OPEN_SHACC_ERROR_PACKER_FAILED;
     }
 
-    // Allocate output program buffer
     void* buffer = shacc_malloc(gxp_bytes.size());
     if (!buffer) {
         diag_stream << "[ERROR] Memory allocation failure for program binary\n";
@@ -671,7 +656,7 @@ OPEN_SHACC_API int SceShaccCgDisassembleGxp(
     size_t gxp_size,
     char** out_disasm
 ) {
-    if (!gxp_binary || !out_disasm || gxp_size < sizeof(open_shacc::packer::GxpHeader)) {
+    if (!gxp_binary || !out_disasm || gxp_size < sizeof(open_shacc::packer::SceGxmProgramHeader)) {
         return OPEN_SHACC_ERROR_INVALID_ARGUMENT;
     }
 
@@ -681,16 +666,27 @@ OPEN_SHACC_API int SceShaccCgDisassembleGxp(
         return OPEN_SHACC_ERROR_INVALID_ARGUMENT;
     }
 
-    const auto* header = reinterpret_cast<const open_shacc::packer::GxpHeader*>(data);
+    const auto* header = reinterpret_cast<const open_shacc::packer::SceGxmProgramHeader*>(data);
+    const bool is_frag = (header->program_flags & open_shacc::packer::GXP_PROGRAM_FLAG_FRAGMENT) != 0;
+    const size_t ucode_abs = offsetof(open_shacc::packer::SceGxmProgramHeader, primary_program_offset)
+                           + static_cast<size_t>(header->primary_program_offset);
+
     std::ostringstream ss;
-    ss << "; GXP Header Analysis\n";
+    ss << "; SceGxmProgram (GXP) Header Analysis\n";
     ss << "; Magic: 0x" << std::hex << header->magic << " ('GXP\\0')\n";
-    ss << "; Version: " << std::dec << header->format_version << "\n";
-    ss << "; Type: " << (header->shader_type == 0 ? "Vertex" : "Fragment") << "\n";
-    ss << "; Total Container Size: " << header->total_size << " bytes\n";
-    ss << "; Microcode Offset: " << header->microcode_offset << " (size: " << header->microcode_size << " bytes)\n";
-    ss << "; Uniform Symbols: " << header->symbol_count << "\n";
-    ss << "; Vertex Attributes: " << header->attribute_count << "\n";
+    ss << "; Version: " << std::dec << static_cast<int>(header->major_version)
+       << "." << static_cast<int>(header->minor_version)
+       << " (SDK 0x" << std::hex << header->sdk_version << std::dec << ")\n";
+    ss << "; Type: " << (is_frag ? "Fragment" : "Vertex") << "\n";
+    ss << "; Total Container Size: " << header->size << " bytes\n";
+    ss << "; Primary Microcode Offset: " << ucode_abs
+       << " (" << header->primary_program_instr_count << " instructions, "
+       << (header->primary_program_instr_count * 8) << " bytes)\n";
+    ss << "; Parameters: " << header->parameter_count << "\n";
+    ss << "; Default Uniform Buffer Words: " << header->default_uniform_buffer_count << "\n";
+    ss << "; Registers: PA=" << header->primary_reg_count
+       << ", SA=" << header->secondary_reg_count
+       << ", TEMP=" << header->temp_reg_count1 << "\n";
 
     *out_disasm = duplicate_string(ss.str().c_str());
     return OPEN_SHACC_SUCCESS;

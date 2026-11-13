@@ -44,13 +44,25 @@ enum class UsseOpcode : uint8_t {
 };
 
 enum class RegisterClass : uint8_t {
-    Temporary = 0, // 'r' / TEMP bank 0
-    Output    = 1, // 'o' / OUTPUT bank 1
-    InputAttr = 2, // 'v' / PRIMATTR bank 2
-    SecAttr   = 3, // 'sa' / SECATTR bank 3 (Uniforms/Constants)
-    Constant  = 4, // 'c' / FPCONSTANT bank
-    TextureSampler = 5 // 's' / Texture sampler slot
+    Temporary      = 0, // 'r' / TEMP bank 0
+    Output         = 1, // 'o' / OUTPUT bank 1
+    InputAttr      = 2, // 'v' / PRIMATTR bank 2
+    SecAttr        = 3, // 'sa' / SECATTR bank 3 (Uniforms/Constants)
+    Constant       = 4, // Logical uniform scalar/vector (mapped to SECATTR bank 3 in hardware)
+    TextureSampler = 5  // 's' / Texture sampler slot (mapped to SECATTR bank 3 in hardware)
 };
+
+inline uint64_t encode_bank(RegisterClass rc) {
+    switch (rc) {
+        case RegisterClass::Temporary:      return 0ULL;
+        case RegisterClass::Output:         return 1ULL;
+        case RegisterClass::InputAttr:      return 2ULL;
+        case RegisterClass::SecAttr:
+        case RegisterClass::Constant:
+        case RegisterClass::TextureSampler: return 3ULL;
+    }
+    return 0ULL;
+}
 
 struct HardwareRegister {
     RegisterClass reg_class = RegisterClass::Temporary;
@@ -64,14 +76,14 @@ struct HardwareRegister {
         if (is_negated) ss << "-";
         if (is_absolute) ss << "|";
         switch (reg_class) {
-            case RegisterClass::Temporary: ss << "r" << static_cast<int>(index); break;
-            case RegisterClass::Output:    ss << "o" << static_cast<int>(index); break;
-            case RegisterClass::InputAttr: ss << "v" << static_cast<int>(index); break;
-            case RegisterClass::SecAttr:   ss << "sa" << static_cast<int>(index); break;
-            case RegisterClass::Constant:  ss << "c" << static_cast<int>(index); break;
+            case RegisterClass::Temporary:      ss << "r" << static_cast<int>(index); break;
+            case RegisterClass::Output:         ss << "o" << static_cast<int>(index); break;
+            case RegisterClass::InputAttr:      ss << "v" << static_cast<int>(index); break;
+            case RegisterClass::SecAttr:        ss << "sa" << static_cast<int>(index); break;
+            case RegisterClass::Constant:       ss << "c" << static_cast<int>(index); break;
             case RegisterClass::TextureSampler: ss << "s" << static_cast<int>(index); break;
         }
-        static const char kComponents[] = {'x', 'y', 'z', 'w'};
+        static constexpr char kComponents[] = {'x', 'y', 'z', 'w'};
         if (sub_index < 4) {
             ss << "." << kComponents[sub_index];
         }
@@ -90,10 +102,10 @@ struct MicrocodeWord {
     explicit MicrocodeWord(uint64_t val) : raw_word(val) {}
 
     static MicrocodeWord encode_phas(bool end = true) {
-        // PHAS bit pattern: 11111010s100e...
-        // 0xFA00000000000000ULL
-        uint64_t w = 0xFA04000000000000ULL;
-        if (end) w |= (1ULL << 55); // end bit
+        // PHAS: "11111010s100eirc--matwwwppppppppbbnn--------xxxxxxoooooooddddddd"
+        // End flag 'e' is bit 51
+        uint64_t w = 0xFA40000000000000ULL;
+        if (end) w |= (1ULL << 51);
         return MicrocodeWord(w);
     }
 
@@ -102,19 +114,24 @@ struct MicrocodeWord {
         HardwareRegister src0,
         uint8_t mask = 0b1111
     ) {
-        // 00111 = VMOV op1
-        uint64_t w = 0x1C00000000000000ULL;
-        // dest_bank (0=TEMP, 1=OUTPUT, 2=PRIMATTR, 3=SECATTR)
-        uint64_t db = static_cast<uint64_t>(dst.reg_class) & 3;
-        w |= (db << 42);
-        w |= (static_cast<uint64_t>(mask & 0xF) << 36);
-        // Double reg indexing for float
-        uint64_t dn = dst.index / 2;
-        w |= ((dn & 0x3F) << 30);
-        uint64_t sn0 = src0.index / 2;
-        w |= ((sn0 & 0x3F) << 24);
-        uint64_t sb0 = static_cast<uint64_t>(src0.reg_class) & 3;
-        w |= ((sb0 & 3) << 18);
+        // VMOV: "00111pppstrydecbmmaanoooiwwwwkllffgghhhhjjjjjjqqqqqquuuuuuvvvvvv"
+        // op1 = 7 (bits 63..59), move_type = 0 (bits 47..46), move_data_type = 5 (F32, bits 42..40),
+        // src1_swiz = 4 (XYZW, bits 38..35), dest_bank_sel = bits 33..32, src1_bank_sel = bits 31..30,
+        // dest_mask = bits 27..24, dest_n = bits 23..18, src1_n = bits 11..6
+        uint64_t w = (7ULL << 59);
+        w |= (5ULL << 40); // F32 move data type
+        w |= (4ULL << 35); // Identity XYZW swizzle
+
+        uint64_t db = encode_bank(dst.reg_class);
+        uint64_t sb1 = encode_bank(src0.reg_class);
+        uint64_t dn = static_cast<uint64_t>(dst.index / 2) & 0x3FULL;
+        uint64_t sn1 = static_cast<uint64_t>(src0.index / 2) & 0x3FULL;
+
+        w |= (db << 32);
+        w |= (sb1 << 30);
+        w |= (static_cast<uint64_t>(mask & 0xF) << 24);
+        w |= (dn << 18);
+        w |= (sn1 << 6);
         return MicrocodeWord(w);
     }
 
@@ -125,13 +142,18 @@ struct MicrocodeWord {
         HardwareRegister src2,
         uint8_t mask = 0b1111
     ) {
-        // 00001 = V32NMAD op1 (32-bit float vector operation)
-        // Bit 59 = 1 for 32-bit float
-        uint64_t w = 0x0800000000000000ULL | (1ULL << 59);
+        // V32NMAD: "00001pppsrrydcbawwwwneeeemmoiittkkllffffffzzzzzzzggghhhhhhjjjjjj"
+        // op1 = 1 (bits 63..59), src2_swiz = 4 (bits 47..44), dest_mask = bits 42..39,
+        // dest_bank_sel = bits 33..32, src1_bank_sel = bits 31..30, src2_bank_sel = bits 29..28,
+        // dest_n = bits 27..22, src1_swiz = 0x20 (XYZW identity, bits 21..15), op2 = bits 14..12,
+        // src1_n = bits 11..6, src2_n = bits 5..0
+        uint64_t w = (1ULL << 59);
+
         uint8_t op2 = 1; // 0=MUL, 1=ADD, 2=FRC, 3=DSX, 4=DSY, 5=MIN, 6=MAX, 7=DP
         switch (op) {
             case UsseOpcode::VMUL: op2 = 0; break;
-            case UsseOpcode::VADD: op2 = 1; break;
+            case UsseOpcode::VADD:
+            case UsseOpcode::VSUB: op2 = 1; break;
             case UsseOpcode::VFRC: op2 = 2; break;
             case UsseOpcode::VDSX: op2 = 3; break;
             case UsseOpcode::VDSY: op2 = 4; break;
@@ -142,23 +164,29 @@ struct MicrocodeWord {
             default: op2 = 1; break;
         }
 
+        w |= (4ULL << 44); // src2_swiz identity
+        w |= (static_cast<uint64_t>(mask & 0xF) << 39);
+        if (op == UsseOpcode::VSUB || src2.is_negated) {
+            w |= (1ULL << 43); // src2 negate
+        }
+        if (src1.is_negated) {
+            w |= (1ULL << 36); // src1 negate
+        }
+
+        uint64_t db  = encode_bank(dst.reg_class);
+        uint64_t sb1 = encode_bank(src1.reg_class);
+        uint64_t sb2 = encode_bank(src2.reg_class);
+        uint64_t dn  = static_cast<uint64_t>(dst.index / 2) & 0x3FULL;
+        uint64_t sn1 = static_cast<uint64_t>(src1.index / 2) & 0x3FULL;
+        uint64_t sn2 = static_cast<uint64_t>(src2.index / 2) & 0x3FULL;
+
+        w |= (db << 32);
+        w |= (sb1 << 30);
+        w |= (sb2 << 28);
+        w |= (dn << 22);
         w |= (static_cast<uint64_t>(op2 & 7) << 12);
-        w |= (static_cast<uint64_t>(mask & 0xF) << 36);
-
-        uint64_t db = static_cast<uint64_t>(dst.reg_class) & 3;
-        w |= (db << 20);
-        uint64_t dn = dst.index / 2;
-        w |= ((dn & 0x3F) << 24);
-
-        uint64_t sb1 = static_cast<uint64_t>(src1.reg_class) & 3;
-        w |= (sb1 << 18);
-        uint64_t sn1 = src1.index / 2;
-        w |= ((sn1 & 0x3F) << 6);
-
-        uint64_t sb2 = static_cast<uint64_t>(src2.reg_class) & 3;
-        w |= (sb2 << 16);
-        uint64_t sn2 = src2.index / 2;
-        w |= (sn2 & 0x3F);
+        w |= (sn1 << 6);
+        w |= sn2;
 
         return MicrocodeWord(w);
     }
@@ -167,17 +195,16 @@ struct MicrocodeWord {
         HardwareRegister dst,
         HardwareRegister src1,
         HardwareRegister src2,
-        uint8_t mask = 0b1111
+        [[maybe_unused]] uint8_t mask = 0b1111
     ) {
-        // VPCK F32 to F32 / F16: "01000pppsnuydercaaaaffftttmmmmbbkkllgggggggoohiijjqqqqqqvwwwwwwx"
-        // 01000 = VPCK
-        uint64_t w = 0x20800d7ef0198002ULL;
-        uint64_t dn = dst.index; // VPCK does not double dest
-        w |= ((dn & 0x7F) << 30);
-        uint64_t sn1 = src1.index * 2;
-        w |= ((sn1 & 0x3F) << 12);
-        uint64_t sn2 = src2.index * 2;
-        w |= ((sn2 & 0x3F) << 1);
+        // VPCK F32 to F32 / F16
+        uint64_t w = 0x40800D7EF0198002ULL;
+        uint64_t dn = dst.index;
+        w |= ((dn & 0x7FULL) << 30);
+        uint64_t sn1 = static_cast<uint64_t>(src1.index) * 2ULL;
+        w |= ((sn1 & 0x3FULL) << 12);
+        uint64_t sn2 = static_cast<uint64_t>(src2.index) * 2ULL;
+        w |= ((sn2 & 0x3FULL) << 1);
         return MicrocodeWord(w);
     }
 
@@ -186,15 +213,14 @@ struct MicrocodeWord {
         HardwareRegister uv_src,
         uint16_t sampler_sa_offset
     ) {
-        // SMP: "11100pppsn-ymrceffaaddlltbbggkhhiijjoooooooqqqqqqquuuuuuuvvvvvvv"
-        // 11100 = SMP (0xE000000000000000ULL)
+        // SMP: 11100pppsn-ymrceffaaddlltbbggkhhiijjoooooooqqqqqqquuuuuuuvvvvvvv
         uint64_t w = 0xE000000000000000ULL;
-        uint64_t dn = dst.index; // dest TEMP
-        w |= ((dn & 0x7F) << 21);
-        uint64_t uv = uv_src.index * 2; // uv src
-        w |= ((uv & 0x7F) << 7);
-        uint64_t samp = sampler_sa_offset / 2; // SECATTR bank 3
-        w |= (samp & 0x7F);
+        uint64_t dn = dst.index;
+        w |= ((dn & 0x7FULL) << 21);
+        uint64_t uv = static_cast<uint64_t>(uv_src.index) * 2ULL;
+        w |= ((uv & 0x7FULL) << 7);
+        uint64_t samp = static_cast<uint64_t>(sampler_sa_offset / 2);
+        w |= (samp & 0x7FULL);
         return MicrocodeWord(w);
     }
 
@@ -219,7 +245,7 @@ struct UsseInstruction {
             case UsseOpcode::HALT: return MicrocodeWord::encode_phas(true);
             case UsseOpcode::VMOV: return MicrocodeWord::encode_vmov(dst, src0, write_mask);
             case UsseOpcode::VPCK: return MicrocodeWord::encode_vpck(dst, src0, src1, write_mask);
-            case UsseOpcode::SMP:  return MicrocodeWord::encode_smp(dst, src0, src1.index);
+            case UsseOpcode::SMP:  return MicrocodeWord::encode_smp(dst, src1, src0.index);
             case UsseOpcode::KILL: return MicrocodeWord::encode_kill();
             default:               return MicrocodeWord::encode_v32nmad(opcode, dst, src0, src1, write_mask);
         }
@@ -244,9 +270,9 @@ struct UsseInstruction {
             case UsseOpcode::VDSX: ss << "VDSX " << dst.to_string() << ", " << src0.to_string(); break;
             case UsseOpcode::VDSY: ss << "VDSY " << dst.to_string() << ", " << src0.to_string(); break;
             case UsseOpcode::VPCK: ss << "VPCK " << dst.to_string() << ", " << src0.to_string() << ", " << src1.to_string(); break;
-            case UsseOpcode::SMP:  ss << "SMP  " << dst.to_string() << ", " << src0.to_string() << ", sa" << static_cast<int>(src1.index); break;
+            case UsseOpcode::SMP:  ss << "SMP  " << dst.to_string() << ", " << src1.to_string() << ", s" << static_cast<int>(src0.index); break;
             case UsseOpcode::KILL: ss << "KILL"; break;
-            case UsseOpcode::PHAS: ss << "PHAS ; Phase switch"; break;
+            case UsseOpcode::PHAS: ss << "PHAS ; End phase"; break;
             case UsseOpcode::HALT: ss << "HALT ; Shader termination"; break;
         }
         if (!comment.empty()) {

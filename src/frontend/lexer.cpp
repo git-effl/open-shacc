@@ -17,6 +17,9 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"uniform",     TokenType::KwUniform},
     {"const",       TokenType::KwConst},
     {"varying",     TokenType::KwVarying},
+    {"static",      TokenType::KwStatic},
+    {"unsigned",    TokenType::KwUnsigned},
+    {"signed",      TokenType::KwSigned},
     {"in",          TokenType::KwIn},
     {"out",         TokenType::KwOut},
     {"inout",       TokenType::KwInOut},
@@ -27,14 +30,39 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"else",        TokenType::KwElse},
     {"for",         TokenType::KwFor},
     {"while",       TokenType::KwWhile},
+    {"do",          TokenType::KwDo},
+    {"break",       TokenType::KwBreak},
+    {"continue",    TokenType::KwContinue},
     {"void",        TokenType::KwVoid},
     {"bool",        TokenType::KwBool},
+    {"bool1",       TokenType::KwBool},
+    {"bool2",       TokenType::KwBool2},
+    {"bool3",       TokenType::KwBool3},
+    {"bool4",       TokenType::KwBool4},
     {"int",         TokenType::KwInt},
+    {"int1",        TokenType::KwInt},
+    {"int2",        TokenType::KwInt2},
+    {"int3",        TokenType::KwInt3},
+    {"int4",        TokenType::KwInt4},
+    {"uint",        TokenType::KwUInt},
+    {"uint1",       TokenType::KwUInt},
+    {"uint2",       TokenType::KwUInt2},
+    {"uint3",       TokenType::KwUInt3},
+    {"uint4",       TokenType::KwUInt4},
     {"short",       TokenType::KwShort},
+    {"short1",      TokenType::KwShort},
+    {"short2",      TokenType::KwShort2},
+    {"short3",      TokenType::KwShort3},
+    {"short4",      TokenType::KwShort4},
     {"ushort",      TokenType::KwUShort},
+    {"ushort1",     TokenType::KwUShort},
+    {"ushort2",     TokenType::KwUShort2},
+    {"ushort3",     TokenType::KwUShort3},
+    {"ushort4",     TokenType::KwUShort4},
     {"char",        TokenType::KwChar},
     {"uchar",       TokenType::KwUChar},
     {"float",       TokenType::KwFloat},
+    {"float1",      TokenType::KwFloat},
     {"float2",      TokenType::KwFloat2},
     {"float3",      TokenType::KwFloat3},
     {"float4",      TokenType::KwFloat4},
@@ -42,6 +70,7 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"float3x3",    TokenType::KwFloat3x3},
     {"float4x4",    TokenType::KwFloat4x4},
     {"half",        TokenType::KwHalf},
+    {"half1",       TokenType::KwHalf},
     {"half2",       TokenType::KwHalf2},
     {"half3",       TokenType::KwHalf3},
     {"half4",       TokenType::KwHalf4},
@@ -49,7 +78,13 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"half3x3",     TokenType::KwHalf3x3},
     {"half4x4",     TokenType::KwHalf4x4},
     {"fixed",       TokenType::KwFixed},
+    {"fixed1",      TokenType::KwFixed},
+    {"fixed2",      TokenType::KwFixed2},
+    {"fixed3",      TokenType::KwFixed3},
+    {"fixed4",      TokenType::KwFixed4},
+    {"sampler1D",   TokenType::KwSampler1D},
     {"sampler2D",   TokenType::KwSampler2D},
+    {"sampler3D",   TokenType::KwSampler3D},
     {"samplerCUBE", TokenType::KwSamplerCube},
     {"sampler_cube",TokenType::KwSamplerCube}
 };
@@ -149,6 +184,10 @@ Token Lexer::scan_number() {
             advance();
         }
         std::string_view text = source_.substr(start_idx, cursor_ - start_idx);
+        // Consume optional integer suffix (u/U/l/L)
+        while (!is_at_end() && (peek() == 'u' || peek() == 'U' || peek() == 'l' || peek() == 'L')) {
+            advance();
+        }
         Token tok;
         tok.type = TokenType::NumberLiteral;
         tok.line = start_line;
@@ -162,7 +201,9 @@ Token Lexer::scan_number() {
         advance();
     }
 
-    if (peek() == '.' && std::isdigit(static_cast<unsigned char>(peek_next()))) {
+    bool is_float = false;
+    if (peek() == '.' && (std::isdigit(static_cast<unsigned char>(peek_next())) || peek_next() == 'f' || peek_next() == 'F' || peek_next() == 'h' || peek_next() == 'H' || !std::isalpha(static_cast<unsigned char>(peek_next())))) {
+        is_float = true;
         advance(); // consume '.'
         while (!is_at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
             advance();
@@ -170,6 +211,7 @@ Token Lexer::scan_number() {
     }
 
     if (peek() == 'e' || peek() == 'E') {
+        is_float = true;
         advance();
         if (peek() == '+' || peek() == '-') advance();
         while (!is_at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
@@ -177,16 +219,21 @@ Token Lexer::scan_number() {
         }
     }
 
-    if (peek() == 'f' || peek() == 'F') {
+    std::string_view num_text = source_.substr(start_idx, cursor_ - start_idx);
+
+    if (!is_at_end() && (peek() == 'f' || peek() == 'F' || peek() == 'h' || peek() == 'H' || peek() == 'x' || peek() == 'X')) {
         advance();
+    } else if (!is_float) {
+        while (!is_at_end() && (peek() == 'u' || peek() == 'U' || peek() == 'l' || peek() == 'L')) {
+            advance();
+        }
     }
 
-    std::string_view text = source_.substr(start_idx, cursor_ - start_idx);
     Token tok;
     tok.type = TokenType::NumberLiteral;
     tok.line = start_line;
     tok.column = start_col;
-    tok.text = std::string(text);
+    tok.text = std::string(num_text);
     tok.number_value = std::strtod(tok.text.c_str(), nullptr);
     return tok;
 }

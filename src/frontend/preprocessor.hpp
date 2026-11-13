@@ -26,6 +26,7 @@ class Preprocessor {
 public:
     Preprocessor() = default;
 
+    void clear_macros();
     void add_macro(const std::string& name, const std::string& body = "1");
     void add_function_macro(const std::string& name, const std::vector<std::string>& params, const std::string& body);
 
@@ -51,6 +52,7 @@ private:
         int depth = 0
     );
 
+    static std::string strip_comments(const std::string& source);
     std::string expand_line_macros(const std::string& line);
     bool evaluate_condition(const std::string& expr);
 };

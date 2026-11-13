@@ -7,6 +7,7 @@
 
 #include "parser.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace open_shacc::frontend {
 
@@ -15,6 +16,11 @@ Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
 const Token& Parser::peek() const {
     if (current_ >= tokens_.size()) return tokens_.back();
     return tokens_[current_];
+}
+
+const Token& Parser::peek_next(size_t offset) const {
+    if (current_ + offset >= tokens_.size()) return tokens_.back();
+    return tokens_[current_ + offset];
 }
 
 const Token& Parser::previous() const {
@@ -51,6 +57,41 @@ const Token& Parser::consume(TokenType type, const std::string& error_message) {
     return kErrToken;
 }
 
+bool Parser::is_value_type_token(TokenType t) {
+    switch (t) {
+        case TokenType::KwBool: case TokenType::KwBool2: case TokenType::KwBool3: case TokenType::KwBool4:
+        case TokenType::KwInt: case TokenType::KwInt2: case TokenType::KwInt3: case TokenType::KwInt4:
+        case TokenType::KwUInt: case TokenType::KwUInt2: case TokenType::KwUInt3: case TokenType::KwUInt4:
+        case TokenType::KwShort: case TokenType::KwShort2: case TokenType::KwShort3: case TokenType::KwShort4:
+        case TokenType::KwUShort: case TokenType::KwUShort2: case TokenType::KwUShort3: case TokenType::KwUShort4:
+        case TokenType::KwChar: case TokenType::KwUChar:
+        case TokenType::KwFloat: case TokenType::KwFloat2: case TokenType::KwFloat3: case TokenType::KwFloat4:
+        case TokenType::KwFloat2x2: case TokenType::KwFloat3x3: case TokenType::KwFloat4x4:
+        case TokenType::KwHalf: case TokenType::KwHalf2: case TokenType::KwHalf3: case TokenType::KwHalf4:
+        case TokenType::KwHalf2x2: case TokenType::KwHalf3x3: case TokenType::KwHalf4x4:
+        case TokenType::KwFixed: case TokenType::KwFixed2: case TokenType::KwFixed3: case TokenType::KwFixed4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Parser::is_type_token(TokenType t) {
+    if (is_value_type_token(t)) return true;
+    switch (t) {
+        case TokenType::KwVoid:
+        case TokenType::KwUnsigned:
+        case TokenType::KwSigned:
+        case TokenType::KwSampler1D:
+        case TokenType::KwSampler2D:
+        case TokenType::KwSampler3D:
+        case TokenType::KwSamplerCube:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void Parser::error(const Token& tok, const std::string& message) {
     diagnostics_.push_back({
         Diagnostic::Level::Error,
@@ -70,38 +111,124 @@ std::string Parser::get_diagnostics_string() const {
 
 bool Parser::parse(TranslationUnit& out_tu) {
     while (!is_at_end()) {
+        size_t before = current_;
         parse_top_level_declaration(out_tu);
+        if (current_ == before && !is_at_end()) {
+            advance();
+        }
     }
     return diagnostics_.empty();
 }
 
+static bool eval_const_int_expr(const Expression* expr, int64_t& out_val) {
+    if (!expr) return false;
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(expr)) {
+        if (std::holds_alternative<int>(lit->value)) {
+            out_val = std::get<int>(lit->value);
+            return true;
+        }
+        if (std::holds_alternative<float>(lit->value)) {
+            out_val = static_cast<int64_t>(std::get<float>(lit->value));
+            return true;
+        }
+        if (std::holds_alternative<bool>(lit->value)) {
+            out_val = std::get<bool>(lit->value) ? 1 : 0;
+            return true;
+        }
+    }
+    if (auto* bin = dynamic_cast<const BinaryExpr*>(expr)) {
+        int64_t l = 0, r = 0;
+        if (!eval_const_int_expr(bin->left.get(), l) || !eval_const_int_expr(bin->right.get(), r)) {
+            return false;
+        }
+        switch (bin->op) {
+            case BinaryOp::Add: out_val = l + r; return true;
+            case BinaryOp::Sub: out_val = l - r; return true;
+            case BinaryOp::Mul: out_val = l * r; return true;
+            case BinaryOp::Div: out_val = (r != 0) ? (l / r) : 1; return true;
+            case BinaryOp::Mod: out_val = (r != 0) ? (l % r) : 0; return true;
+            case BinaryOp::Shl: out_val = l << (r & 31); return true;
+            case BinaryOp::Shr: out_val = l >> (r & 31); return true;
+            default: return false;
+        }
+    }
+    if (auto* un = dynamic_cast<const UnaryExpr*>(expr)) {
+        int64_t v = 0;
+        if (!eval_const_int_expr(un->operand.get(), v)) return false;
+        if (un->op == UnaryOp::Negate) { out_val = -v; return true; }
+    }
+    return false;
+}
+
+uint32_t Parser::parse_array_dimension() {
+    uint32_t dim = 1;
+    if (!check(TokenType::CloseBracket)) {
+        ExprPtr dim_expr = parse_expression();
+        int64_t val = 1;
+        if (eval_const_int_expr(dim_expr.get(), val) && val > 0) {
+            dim = static_cast<uint32_t>(val);
+        }
+    }
+    consume(TokenType::CloseBracket, "Expected ']' after array size");
+    return dim;
+}
+
 DataType Parser::parse_type() {
     DataType dt;
-    if (match(TokenType::KwVoid))          dt.base = BaseType::Void;
-    else if (match(TokenType::KwBool))     dt.base = BaseType::Bool;
-    else if (match(TokenType::KwInt))      dt.base = BaseType::Int;
-    else if (match(TokenType::KwShort))    dt.base = BaseType::Short;
-    else if (match(TokenType::KwUShort))   dt.base = BaseType::UShort;
-    else if (match(TokenType::KwChar))     dt.base = BaseType::Char;
-    else if (match(TokenType::KwUChar))    dt.base = BaseType::UChar;
-    else if (match(TokenType::KwFloat))    dt.base = BaseType::Float;
-    else if (match(TokenType::KwFloat2))   dt.base = BaseType::Float2;
-    else if (match(TokenType::KwFloat3))   dt.base = BaseType::Float3;
-    else if (match(TokenType::KwFloat4))   dt.base = BaseType::Float4;
-    else if (match(TokenType::KwFloat2x2)) dt.base = BaseType::Float2x2;
-    else if (match(TokenType::KwFloat3x3)) dt.base = BaseType::Float3x3;
-    else if (match(TokenType::KwFloat4x4)) dt.base = BaseType::Float4x4;
-    else if (match(TokenType::KwHalf))     dt.base = BaseType::Half;
-    else if (match(TokenType::KwHalf2))    dt.base = BaseType::Half2;
-    else if (match(TokenType::KwHalf3))    dt.base = BaseType::Half3;
-    else if (match(TokenType::KwHalf4))    dt.base = BaseType::Half4;
-    else if (match(TokenType::KwHalf2x2))  dt.base = BaseType::Half2x2;
-    else if (match(TokenType::KwHalf3x3))  dt.base = BaseType::Half3x3;
-    else if (match(TokenType::KwHalf4x4))  dt.base = BaseType::Half4x4;
-    else if (match(TokenType::KwFixed))    dt.base = BaseType::Fixed;
-    else if (match(TokenType::KwSampler2D)) dt.base = BaseType::Sampler2D;
+    bool is_unsigned = false;
+    while (check(TokenType::KwUnsigned) || check(TokenType::KwSigned)) {
+        if (match(TokenType::KwUnsigned)) is_unsigned = true;
+        else match(TokenType::KwSigned);
+    }
+
+    if (match(TokenType::KwVoid))             dt.base = BaseType::Void;
+    else if (match(TokenType::KwBool))        dt.base = BaseType::Bool;
+    else if (match(TokenType::KwBool2))       dt.base = BaseType::Bool2;
+    else if (match(TokenType::KwBool3))       dt.base = BaseType::Bool3;
+    else if (match(TokenType::KwBool4))       dt.base = BaseType::Bool4;
+    else if (match(TokenType::KwInt))         dt.base = is_unsigned ? BaseType::UInt : BaseType::Int;
+    else if (match(TokenType::KwInt2))        dt.base = is_unsigned ? BaseType::UInt2 : BaseType::Int2;
+    else if (match(TokenType::KwInt3))        dt.base = is_unsigned ? BaseType::UInt3 : BaseType::Int3;
+    else if (match(TokenType::KwInt4))        dt.base = is_unsigned ? BaseType::UInt4 : BaseType::Int4;
+    else if (match(TokenType::KwUInt))        dt.base = BaseType::UInt;
+    else if (match(TokenType::KwUInt2))       dt.base = BaseType::UInt2;
+    else if (match(TokenType::KwUInt3))       dt.base = BaseType::UInt3;
+    else if (match(TokenType::KwUInt4))       dt.base = BaseType::UInt4;
+    else if (match(TokenType::KwShort))       dt.base = is_unsigned ? BaseType::UShort : BaseType::Short;
+    else if (match(TokenType::KwShort2))      dt.base = is_unsigned ? BaseType::UShort2 : BaseType::Short2;
+    else if (match(TokenType::KwShort3))      dt.base = is_unsigned ? BaseType::UShort3 : BaseType::Short3;
+    else if (match(TokenType::KwShort4))      dt.base = is_unsigned ? BaseType::UShort4 : BaseType::Short4;
+    else if (match(TokenType::KwUShort))      dt.base = BaseType::UShort;
+    else if (match(TokenType::KwUShort2))     dt.base = BaseType::UShort2;
+    else if (match(TokenType::KwUShort3))     dt.base = BaseType::UShort3;
+    else if (match(TokenType::KwUShort4))     dt.base = BaseType::UShort4;
+    else if (match(TokenType::KwChar))        dt.base = is_unsigned ? BaseType::UChar : BaseType::Char;
+    else if (match(TokenType::KwUChar))       dt.base = BaseType::UChar;
+    else if (match(TokenType::KwFloat))       dt.base = BaseType::Float;
+    else if (match(TokenType::KwFloat2))      dt.base = BaseType::Float2;
+    else if (match(TokenType::KwFloat3))      dt.base = BaseType::Float3;
+    else if (match(TokenType::KwFloat4))      dt.base = BaseType::Float4;
+    else if (match(TokenType::KwFloat2x2))    dt.base = BaseType::Float2x2;
+    else if (match(TokenType::KwFloat3x3))    dt.base = BaseType::Float3x3;
+    else if (match(TokenType::KwFloat4x4))    dt.base = BaseType::Float4x4;
+    else if (match(TokenType::KwHalf))        dt.base = BaseType::Half;
+    else if (match(TokenType::KwHalf2))       dt.base = BaseType::Half2;
+    else if (match(TokenType::KwHalf3))       dt.base = BaseType::Half3;
+    else if (match(TokenType::KwHalf4))       dt.base = BaseType::Half4;
+    else if (match(TokenType::KwHalf2x2))     dt.base = BaseType::Half2x2;
+    else if (match(TokenType::KwHalf3x3))     dt.base = BaseType::Half3x3;
+    else if (match(TokenType::KwHalf4x4))     dt.base = BaseType::Half4x4;
+    else if (match(TokenType::KwFixed))       dt.base = BaseType::Fixed;
+    else if (match(TokenType::KwFixed2))      dt.base = BaseType::Fixed2;
+    else if (match(TokenType::KwFixed3))      dt.base = BaseType::Fixed3;
+    else if (match(TokenType::KwFixed4))      dt.base = BaseType::Fixed4;
+    else if (match(TokenType::KwSampler1D))   dt.base = BaseType::Sampler1D;
+    else if (match(TokenType::KwSampler2D))   dt.base = BaseType::Sampler2D;
+    else if (match(TokenType::KwSampler3D))   dt.base = BaseType::Sampler3D;
     else if (match(TokenType::KwSamplerCube)) dt.base = BaseType::SamplerCube;
-    else if (check(TokenType::Identifier)) {
+    else if (is_unsigned) {
+        dt.base = BaseType::UInt;
+    } else if (check(TokenType::Identifier)) {
         dt.base = BaseType::CustomStruct;
         dt.struct_name = advance().text;
     } else {
@@ -121,10 +248,23 @@ std::string Parser::parse_optional_semantic() {
 }
 
 void Parser::parse_top_level_declaration(TranslationUnit& tu) {
-    // Skip optional qualifiers
-    while (match(TokenType::KwConst) || match(TokenType::KwInline) || match(TokenType::KwVarying)) {
-        match(TokenType::KwIn);
-        match(TokenType::KwOut);
+    bool is_static_or_const = false;
+    bool is_varying = false;
+    while (check(TokenType::KwConst) || check(TokenType::KwInline) ||
+           check(TokenType::KwVarying) || check(TokenType::KwStatic) ||
+           check(TokenType::KwIn) || check(TokenType::KwOut)) {
+        if (match(TokenType::KwConst) || match(TokenType::KwStatic)) {
+            is_static_or_const = true;
+        } else if (match(TokenType::KwVarying)) {
+            is_varying = true;
+        } else {
+            advance();
+        }
+    }
+    (void)is_varying;
+
+    if (match(TokenType::Semicolon)) {
+        return;
     }
 
     if (check(TokenType::KwStruct)) {
@@ -138,20 +278,53 @@ void Parser::parse_top_level_declaration(TranslationUnit& tu) {
         if (check(TokenType::Identifier)) {
             std::string name = advance().text;
 
-            // Optional array dimensions e.g., float4 param[16]
             if (match(TokenType::OpenBracket)) {
-                if (check(TokenType::NumberLiteral)) {
-                    type.array_size = static_cast<uint32_t>(advance().number_value);
-                }
-                consume(TokenType::CloseBracket, "Expected ']' after array size");
+                type.array_size = parse_array_dimension();
             }
 
             if (check(TokenType::OpenParen)) {
                 parse_function_or_global(tu, type, name);
             } else {
                 std::string semantic = parse_optional_semantic();
-                tu.uniforms.push_back(UniformDecl{type, name, semantic, 0});
-                match(TokenType::Semicolon);
+                if (match(TokenType::Assign)) {
+                    VarDeclStmt global_var;
+                    global_var.type = type;
+                    global_var.name = name;
+                    global_var.semantic = semantic;
+                    global_var.initializer = parse_expression();
+                    tu.globals.push_back(std::move(global_var));
+                    while (match(TokenType::Comma)) {
+                        std::string next_name = consume(TokenType::Identifier, "Expected global variable name").text;
+                        VarDeclStmt extra;
+                        extra.type = type;
+                        extra.name = next_name;
+                        if (match(TokenType::Assign)) {
+                            extra.initializer = parse_expression();
+                        }
+                        tu.globals.push_back(std::move(extra));
+                    }
+                    consume(TokenType::Semicolon, "Expected ';' after global variable declaration");
+                } else if (is_static_or_const) {
+                    VarDeclStmt global_var;
+                    global_var.type = type;
+                    global_var.name = name;
+                    global_var.semantic = semantic;
+                    tu.globals.push_back(std::move(global_var));
+                    consume(TokenType::Semicolon, "Expected ';' after declaration");
+                } else {
+                    tu.uniforms.push_back(UniformDecl{type, name, semantic, 0});
+                    while (match(TokenType::Comma)) {
+                        std::string next_name = consume(TokenType::Identifier, "Expected uniform variable name").text;
+                        DataType next_type = type;
+                        next_type.array_size = 1;
+                        if (match(TokenType::OpenBracket)) {
+                            next_type.array_size = parse_array_dimension();
+                        }
+                        std::string next_sem = parse_optional_semantic();
+                        tu.uniforms.push_back(UniformDecl{next_type, next_name, next_sem, 0});
+                    }
+                    match(TokenType::Semicolon);
+                }
             }
         } else {
             error(peek(), "Expected declaration identifier after type");
@@ -173,50 +346,47 @@ void Parser::parse_struct_declaration(TranslationUnit& tu) {
     sdecl.name = struct_name;
 
     while (!check(TokenType::CloseBrace) && !is_at_end()) {
+        while (match(TokenType::KwConst)) {}
         DataType field_type = parse_type();
-        if (!check(TokenType::Identifier)) {
-            error(peek(), "Expected field name in struct");
-            break;
-        }
-        std::string field_name = advance().text;
-
-        if (match(TokenType::OpenBracket)) {
-            if (check(TokenType::NumberLiteral)) {
-                field_type.array_size = static_cast<uint32_t>(advance().number_value);
+        do {
+            if (!check(TokenType::Identifier)) {
+                error(peek(), "Expected field name in struct");
+                break;
             }
-            consume(TokenType::CloseBracket, "Expected ']'");
-        }
-
-        std::string semantic = parse_optional_semantic();
+            std::string field_name = advance().text;
+            DataType this_type = field_type;
+            if (match(TokenType::OpenBracket)) {
+                this_type.array_size = parse_array_dimension();
+            }
+            std::string semantic = parse_optional_semantic();
+            sdecl.fields.push_back(StructField{this_type, field_name, semantic});
+        } while (match(TokenType::Comma));
         consume(TokenType::Semicolon, "Expected ';' after struct field declaration");
-        sdecl.fields.push_back(StructField{field_type, field_name, semantic});
     }
 
     consume(TokenType::CloseBrace, "Expected '}' after struct body");
-    consume(TokenType::Semicolon, "Expected ';' after struct declaration");
+    match(TokenType::Semicolon);
     tu.structs.push_back(std::move(sdecl));
 }
 
 void Parser::parse_uniform_or_global(TranslationUnit& tu) {
     consume(TokenType::KwUniform, "Expected 'uniform'");
+    while (match(TokenType::KwConst)) {}
     DataType type = parse_type();
-    if (!check(TokenType::Identifier)) {
-        error(peek(), "Expected uniform variable name");
-        return;
-    }
-    std::string name = advance().text;
-
-    if (match(TokenType::OpenBracket)) {
-        if (check(TokenType::NumberLiteral)) {
-            type.array_size = static_cast<uint32_t>(advance().number_value);
+    do {
+        if (!check(TokenType::Identifier)) {
+            error(peek(), "Expected uniform variable name");
+            break;
         }
-        consume(TokenType::CloseBracket, "Expected ']' after array size");
-    }
-
-    std::string semantic = parse_optional_semantic();
+        std::string name = advance().text;
+        DataType this_type = type;
+        if (match(TokenType::OpenBracket)) {
+            this_type.array_size = parse_array_dimension();
+        }
+        std::string semantic = parse_optional_semantic();
+        tu.uniforms.push_back(UniformDecl{this_type, name, semantic, 0});
+    } while (match(TokenType::Comma));
     consume(TokenType::Semicolon, "Expected ';' after uniform declaration");
-
-    tu.uniforms.push_back(UniformDecl{type, name, semantic, 0});
 }
 
 void Parser::parse_function_or_global(TranslationUnit& tu, DataType type, const std::string& name) {
@@ -227,42 +397,51 @@ void Parser::parse_function_or_global(TranslationUnit& tu, DataType type, const 
     fn.name = name;
 
     if (!check(TokenType::CloseParen)) {
-        do {
-            bool is_in = true;
-            bool is_out = false;
-            bool is_unif = false;
+        // Handle f(void) parameter list
+        if (check(TokenType::KwVoid) && peek_next().type == TokenType::CloseParen) {
+            advance();
+        } else {
+            do {
+                bool is_in = true;
+                bool is_out = false;
+                bool is_unif = false;
 
-            while (check(TokenType::KwIn) || check(TokenType::KwOut) || check(TokenType::KwInOut) || check(TokenType::KwUniform) || check(TokenType::KwConst)) {
-                if (match(TokenType::KwIn)) { is_in = true; is_out = false; }
-                else if (match(TokenType::KwOut)) { is_in = false; is_out = true; }
-                else if (match(TokenType::KwInOut)) { is_in = true; is_out = true; }
-                else if (match(TokenType::KwUniform)) { is_unif = true; }
-                else if (match(TokenType::KwConst)) {}
-            }
-
-            DataType param_type = parse_type();
-
-            while (check(TokenType::KwIn) || check(TokenType::KwOut) || check(TokenType::KwInOut)) {
-                if (match(TokenType::KwIn)) { is_in = true; is_out = false; }
-                else if (match(TokenType::KwOut)) { is_in = false; is_out = true; }
-                else if (match(TokenType::KwInOut)) { is_in = true; is_out = true; }
-            }
-
-            std::string param_name;
-            if (check(TokenType::Identifier)) {
-                param_name = advance().text;
-            }
-
-            if (match(TokenType::OpenBracket)) {
-                if (check(TokenType::NumberLiteral)) {
-                    param_type.array_size = static_cast<uint32_t>(advance().number_value);
+                while (check(TokenType::KwIn) || check(TokenType::KwOut) ||
+                       check(TokenType::KwInOut) || check(TokenType::KwUniform) ||
+                       check(TokenType::KwConst) || check(TokenType::KwVarying)) {
+                    if (match(TokenType::KwIn)) { is_in = true; is_out = false; }
+                    else if (match(TokenType::KwOut)) { is_in = false; is_out = true; }
+                    else if (match(TokenType::KwInOut)) { is_in = true; is_out = true; }
+                    else if (match(TokenType::KwUniform)) { is_unif = true; }
+                    else advance();
                 }
-                consume(TokenType::CloseBracket, "Expected ']'");
-            }
 
-            std::string semantic = parse_optional_semantic();
-            fn.parameters.push_back(ParameterDecl{param_type, param_name, semantic, is_in, is_out, is_unif});
-        } while (match(TokenType::Comma));
+                DataType param_type = parse_type();
+
+                // Support post-type qualifiers e.g. `float4 inout Ambient` or `float4 out Pos`
+                while (check(TokenType::KwIn) || check(TokenType::KwOut) || check(TokenType::KwInOut)) {
+                    if (match(TokenType::KwIn)) { is_in = true; is_out = false; }
+                    else if (match(TokenType::KwOut)) { is_in = false; is_out = true; }
+                    else if (match(TokenType::KwInOut)) { is_in = true; is_out = true; }
+                }
+
+                std::string param_name;
+                if (check(TokenType::Identifier)) {
+                    param_name = advance().text;
+                }
+
+                if (match(TokenType::OpenBracket)) {
+                    param_type.array_size = parse_array_dimension();
+                }
+
+                std::string semantic = parse_optional_semantic();
+                if (match(TokenType::Assign)) {
+                    // Optional default parameter value
+                    parse_expression();
+                }
+                fn.parameters.push_back(ParameterDecl{param_type, param_name, semantic, is_in, is_out, is_unif});
+            } while (match(TokenType::Comma));
+        }
     }
 
     consume(TokenType::CloseParen, "Expected ')' closing parameter list");
@@ -279,10 +458,21 @@ void Parser::parse_function_or_global(TranslationUnit& tu, DataType type, const 
 }
 
 StmtPtr Parser::parse_statement() {
+    if (match(TokenType::Semicolon))   return std::make_unique<BlockStmt>();
     if (check(TokenType::OpenBrace))   return parse_block_statement();
     if (check(TokenType::KwReturn))    return parse_return_statement();
     if (check(TokenType::KwIf))        return parse_if_statement();
     if (check(TokenType::KwFor))       return parse_for_statement();
+    if (check(TokenType::KwWhile))     return parse_while_statement();
+    if (check(TokenType::KwDo))        return parse_do_while_statement();
+    if (match(TokenType::KwBreak)) {
+        consume(TokenType::Semicolon, "Expected ';' after break");
+        return std::make_unique<BreakStmt>();
+    }
+    if (match(TokenType::KwContinue)) {
+        consume(TokenType::Semicolon, "Expected ';' after continue");
+        return std::make_unique<ContinueStmt>();
+    }
     if (match(TokenType::KwDiscard)) {
         consume(TokenType::Semicolon, "Expected ';' after discard");
         return std::make_unique<DiscardStmt>();
@@ -294,7 +484,11 @@ StmtPtr Parser::parse_block_statement() {
     consume(TokenType::OpenBrace, "Expected '{'");
     auto block = std::make_unique<BlockStmt>();
     while (!check(TokenType::CloseBrace) && !is_at_end()) {
+        size_t before = current_;
         block->statements.push_back(parse_statement());
+        if (current_ == before && !is_at_end()) {
+            advance();
+        }
     }
     consume(TokenType::CloseBrace, "Expected '}'");
     return block;
@@ -348,10 +542,7 @@ StmtPtr Parser::parse_for_statement() {
 
     StmtPtr incr_stmt = nullptr;
     if (!check(TokenType::CloseParen)) {
-        ExprPtr expr = parse_expression();
-        auto stmt = std::make_unique<AssignStmt>();
-        stmt->lvalue = std::move(expr);
-        incr_stmt = std::move(stmt);
+        incr_stmt = parse_expr_or_assign_stmt();
     }
     consume(TokenType::CloseParen, "Expected ')' after for clause");
 
@@ -365,68 +556,116 @@ StmtPtr Parser::parse_for_statement() {
     return for_stmt;
 }
 
-StmtPtr Parser::parse_var_decl_or_assign() {
-    bool is_type = check(TokenType::KwFloat) || check(TokenType::KwFloat2) ||
-                   check(TokenType::KwFloat3) || check(TokenType::KwFloat4) ||
-                   check(TokenType::KwFloat2x2) || check(TokenType::KwFloat3x3) || check(TokenType::KwFloat4x4) ||
-                   check(TokenType::KwHalf) || check(TokenType::KwHalf2) ||
-                   check(TokenType::KwHalf3) || check(TokenType::KwHalf4) ||
-                   check(TokenType::KwInt) || check(TokenType::KwShort) || check(TokenType::KwUShort) ||
-                   check(TokenType::KwChar) || check(TokenType::KwUChar) || check(TokenType::KwBool);
+StmtPtr Parser::parse_while_statement() {
+    consume(TokenType::KwWhile, "Expected 'while'");
+    consume(TokenType::OpenParen, "Expected '(' after 'while'");
+    ExprPtr cond = parse_expression();
+    consume(TokenType::CloseParen, "Expected ')' after while condition");
+    StmtPtr body = parse_statement();
 
-    if (!is_type && check(TokenType::Identifier) && current_ + 1 < tokens_.size() &&
-        tokens_[current_ + 1].type == TokenType::Identifier) {
-        is_type = true;
-    }
+    auto while_stmt = std::make_unique<WhileStmt>();
+    while_stmt->condition = std::move(cond);
+    while_stmt->body = std::move(body);
+    return while_stmt;
+}
 
-    if (is_type) {
-        DataType type = parse_type();
-        std::string name = consume(TokenType::Identifier, "Expected variable name").text;
+StmtPtr Parser::parse_do_while_statement() {
+    consume(TokenType::KwDo, "Expected 'do'");
+    StmtPtr body = parse_statement();
+    consume(TokenType::KwWhile, "Expected 'while' after do body");
+    consume(TokenType::OpenParen, "Expected '(' after 'while'");
+    ExprPtr cond = parse_expression();
+    consume(TokenType::CloseParen, "Expected ')' after do-while condition");
+    consume(TokenType::Semicolon, "Expected ';' after do-while");
 
-        if (match(TokenType::OpenBracket)) {
-            if (check(TokenType::NumberLiteral)) {
-                type.array_size = static_cast<uint32_t>(advance().number_value);
-            }
-            consume(TokenType::CloseBracket, "Expected ']'");
-        }
+    auto dw = std::make_unique<DoWhileStmt>();
+    dw->body = std::move(body);
+    dw->condition = std::move(cond);
+    return dw;
+}
 
-        std::string semantic = parse_optional_semantic();
-
-        auto decl = std::make_unique<VarDeclStmt>();
-        decl->type = type;
-        decl->name = name;
-        decl->semantic = semantic;
-
-        if (match(TokenType::Assign)) {
-            decl->initializer = parse_expression();
-        }
-        consume(TokenType::Semicolon, "Expected ';' after variable declaration");
-        return decl;
-    }
-
+StmtPtr Parser::parse_expr_or_assign_stmt() {
     ExprPtr expr = parse_expression();
 
-    // Check compound assignment e.g. x += y; x++;
     BinaryOp op = BinaryOp::Equal;
-    if (match(TokenType::Assign))          op = BinaryOp::Equal;
-    else if (match(TokenType::PlusAssign))  op = BinaryOp::Add;
-    else if (match(TokenType::MinusAssign)) op = BinaryOp::Sub;
-    else if (match(TokenType::StarAssign))  op = BinaryOp::Mul;
-    else if (match(TokenType::SlashAssign)) op = BinaryOp::Div;
+    bool has_compound = false;
+    if (match(TokenType::PlusAssign))       { op = BinaryOp::Add; has_compound = true; }
+    else if (match(TokenType::MinusAssign)) { op = BinaryOp::Sub; has_compound = true; }
+    else if (match(TokenType::StarAssign))  { op = BinaryOp::Mul; has_compound = true; }
+    else if (match(TokenType::SlashAssign)) { op = BinaryOp::Div; has_compound = true; }
 
-    if (op != BinaryOp::Equal) {
+    if (has_compound) {
         ExprPtr rhs = parse_expression();
         auto assign = std::make_unique<AssignStmt>();
         assign->lvalue = std::move(expr);
         assign->rvalue = std::move(rhs);
         assign->compound_op = op;
-        consume(TokenType::Semicolon, "Expected ';' after assignment");
         return assign;
     }
 
-    consume(TokenType::Semicolon, "Expected ';' after expression statement");
+    // Unwrap BinaryExpr(BinaryOp::Assign, lvalue, rvalue) emitted by parse_assignment()
+    if (auto* bin = dynamic_cast<BinaryExpr*>(expr.get()); bin && bin->op == BinaryOp::Assign) {
+        auto assign = std::make_unique<AssignStmt>();
+        assign->lvalue = std::move(bin->left);
+        assign->rvalue = std::move(bin->right);
+        assign->compound_op = BinaryOp::Assign;
+        return assign;
+    }
+
     auto stmt = std::make_unique<AssignStmt>();
     stmt->lvalue = std::move(expr);
+    stmt->compound_op = BinaryOp::Assign;
+    return stmt;
+}
+
+StmtPtr Parser::parse_var_decl_or_assign() {
+    while (match(TokenType::KwConst) || match(TokenType::KwStatic)) {}
+
+    bool is_type = is_type_token(peek().type);
+    if (!is_type && check(TokenType::Identifier) && peek_next().type == TokenType::Identifier) {
+        is_type = true;
+    }
+
+    if (is_type) {
+        DataType base_type = parse_type();
+        std::vector<std::unique_ptr<VarDeclStmt>> decls;
+
+        do {
+            std::string name = consume(TokenType::Identifier, "Expected variable name").text;
+            DataType this_type = base_type;
+            this_type.array_size = 1;
+
+            if (match(TokenType::OpenBracket)) {
+                this_type.array_size = parse_array_dimension();
+            }
+
+            std::string semantic = parse_optional_semantic();
+
+            auto decl = std::make_unique<VarDeclStmt>();
+            decl->type = this_type;
+            decl->name = name;
+            decl->semantic = semantic;
+
+            if (match(TokenType::Assign)) {
+                decl->initializer = parse_expression();
+            }
+            decls.push_back(std::move(decl));
+        } while (match(TokenType::Comma));
+
+        consume(TokenType::Semicolon, "Expected ';' after variable declaration");
+
+        if (decls.size() == 1) {
+            return std::move(decls[0]);
+        }
+        auto block = std::make_unique<BlockStmt>();
+        for (auto& d : decls) {
+            block->statements.push_back(std::move(d));
+        }
+        return block;
+    }
+
+    StmtPtr stmt = parse_expr_or_assign_stmt();
+    consume(TokenType::Semicolon, "Expected ';' after expression statement");
     return stmt;
 }
 
@@ -438,7 +677,7 @@ ExprPtr Parser::parse_assignment() {
     ExprPtr expr = parse_ternary();
     if (match(TokenType::Assign)) {
         ExprPtr val = parse_assignment();
-        return std::make_unique<BinaryExpr>(BinaryOp::Equal, std::move(expr), std::move(val));
+        return std::make_unique<BinaryExpr>(BinaryOp::Assign, std::move(expr), std::move(val));
     }
     return expr;
 }
@@ -448,7 +687,7 @@ ExprPtr Parser::parse_ternary() {
     if (match(TokenType::Question)) {
         ExprPtr then_e = parse_expression();
         consume(TokenType::Colon, "Expected ':' in ternary expression");
-        ExprPtr else_e = parse_expression();
+        ExprPtr else_e = parse_ternary();
         return std::make_unique<TernaryExpr>(std::move(expr), std::move(then_e), std::move(else_e));
     }
     return expr;
@@ -560,6 +799,9 @@ ExprPtr Parser::parse_multiplicative() {
 }
 
 ExprPtr Parser::parse_unary() {
+    if (match(TokenType::Plus)) {
+        return parse_unary();
+    }
     if (match(TokenType::Minus)) {
         ExprPtr opnd = parse_unary();
         return std::make_unique<UnaryExpr>(UnaryOp::Negate, std::move(opnd));
@@ -581,19 +823,20 @@ ExprPtr Parser::parse_unary() {
         return std::make_unique<UnaryExpr>(UnaryOp::Decr, std::move(opnd), false);
     }
 
-    // C-style cast e.g. (float4)x or (int)y
-    if (check(TokenType::OpenParen) && current_ + 1 < tokens_.size()) {
-        TokenType t = tokens_[current_ + 1].type;
-        if (t == TokenType::KwFloat || t == TokenType::KwFloat2 || t == TokenType::KwFloat3 || t == TokenType::KwFloat4 ||
-            t == TokenType::KwHalf || t == TokenType::KwHalf2 || t == TokenType::KwHalf3 || t == TokenType::KwHalf4 ||
-            t == TokenType::KwInt || t == TokenType::KwShort || t == TokenType::KwUShort || t == TokenType::KwBool) {
+    // C-style cast e.g. (float4)x, (unsigned short)y, (int)z
+    if (check(TokenType::OpenParen)) {
+        TokenType t = peek_next().type;
+        if (is_value_type_token(t) || t == TokenType::KwUnsigned || t == TokenType::KwSigned) {
+            size_t saved = current_;
             advance(); // consume '('
             DataType dt = parse_type();
-            consume(TokenType::CloseParen, "Expected ')' after cast type");
-            ExprPtr target = parse_unary();
-            std::vector<ExprPtr> args;
-            args.push_back(std::move(target));
-            return std::make_unique<ConstructExpr>(dt, std::move(args));
+            if (match(TokenType::CloseParen)) {
+                ExprPtr target = parse_unary();
+                std::vector<ExprPtr> args;
+                args.push_back(std::move(target));
+                return std::make_unique<ConstructExpr>(dt, std::move(args));
+            }
+            current_ = saved;
         }
     }
 
@@ -634,10 +877,8 @@ ExprPtr Parser::parse_primary() {
         return expr;
     }
 
-    // Type constructor (e.g. float4(x, y, z, 1.0) or half2(0.0, 0.0))
-    if (check(TokenType::KwFloat) || check(TokenType::KwFloat2) || check(TokenType::KwFloat3) || check(TokenType::KwFloat4) ||
-        check(TokenType::KwHalf) || check(TokenType::KwHalf2) || check(TokenType::KwHalf3) || check(TokenType::KwHalf4) ||
-        check(TokenType::KwInt) || check(TokenType::KwShort) || check(TokenType::KwUShort) || check(TokenType::KwBool)) {
+    // Type constructor (e.g. float4(x, y, z, 1.0), short2(a, b), half2(0.0, 0.0))
+    if (is_value_type_token(peek().type)) {
         DataType dt = parse_type();
         consume(TokenType::OpenParen, "Expected '(' in constructor");
         std::vector<ExprPtr> args;
@@ -654,11 +895,23 @@ ExprPtr Parser::parse_primary() {
     if (check(TokenType::Identifier)) {
         std::string id = advance().text;
 
-        // Template argument check e.g. bit_cast<short2>(x)
-        if (check(TokenType::Less)) {
+        if (id == "true") return std::make_unique<LiteralExpr>(true);
+        if (id == "false") return std::make_unique<LiteralExpr>(false);
+
+        // Template argument check e.g. bit_cast<short2>(x) only when followed by (...)
+        if (check(TokenType::Less) && (is_type_token(peek_next().type) || peek_next().type == TokenType::Identifier)) {
+            size_t saved = current_;
             advance(); // consume '<'
-            parse_type(); // type inside template
-            consume(TokenType::Greater, "Expected '>' in template call");
+            int angle_depth = 1;
+            while (!is_at_end() && angle_depth > 0) {
+                if (check(TokenType::Less)) angle_depth++;
+                else if (check(TokenType::Greater)) angle_depth--;
+                advance();
+            }
+            if (!check(TokenType::OpenParen)) {
+                // Not a template call, rewind so '<' is parsed as comparison
+                current_ = saved;
+            }
         }
 
         if (match(TokenType::OpenParen)) {

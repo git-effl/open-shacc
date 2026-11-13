@@ -36,29 +36,27 @@ bool RegisterAllocator::allocate_uniform(
         return allocate_sampler(name, type, out_binding);
     }
 
-    uint8_t words_needed = 0;
-    if (type.base == frontend::BaseType::Float4x4 || type.base == frontend::BaseType::Float3x3 || type.base == frontend::BaseType::Float2x2) {
-        // float4x4 requires 16 float words (or 4 vec4 registers = 16 scalar registers)
-        words_needed = 16;
-        // Align to 4-word boundary for matrix uniforms
+    uint16_t words_per_elem = 1;
+    if (type.is_matrix()) {
+        size_t rows = type.matrix_rows();
+        size_t cols = type.matrix_cols();
+        words_per_elem = static_cast<uint16_t>(rows * cols);
         if (next_constant_ % 4 != 0) {
-            next_constant_ = static_cast<uint8_t>((next_constant_ + 3) & ~3);
+            next_constant_ = static_cast<uint16_t>((next_constant_ + 3) & ~3u);
         }
-    } else if (type.base == frontend::BaseType::Float4) {
-        words_needed = 4;
-        if (next_constant_ % 4 != 0) {
-            next_constant_ = static_cast<uint8_t>((next_constant_ + 3) & ~3);
-        }
-    } else if (type.base == frontend::BaseType::Float3) {
-        words_needed = 3;
-    } else if (type.base == frontend::BaseType::Float2) {
-        words_needed = 2;
     } else {
-        words_needed = 1;
+        words_per_elem = static_cast<uint16_t>(type.component_count());
+        if (words_per_elem == 0) words_per_elem = 1;
+        if (words_per_elem == 4 && next_constant_ % 4 != 0) {
+            next_constant_ = static_cast<uint16_t>((next_constant_ + 3) & ~3u);
+        }
     }
 
-    if (static_cast<int>(next_constant_) + words_needed > 256) {
-        return false; // Exceeded constant register capacity (c0..c255)
+    uint16_t array_elems = static_cast<uint16_t>(type.array_size > 1 ? type.array_size : 1);
+    uint16_t words_needed = static_cast<uint16_t>(words_per_elem * array_elems);
+
+    if (static_cast<uint32_t>(next_constant_) + words_needed > 1024u) {
+        return false; // Exceeded default uniform buffer capacity
     }
 
     out_binding.name = name;
@@ -68,7 +66,7 @@ bool RegisterAllocator::allocate_uniform(
     out_binding.register_count = words_needed;
     out_binding.semantic = semantic;
 
-    next_constant_ += words_needed;
+    next_constant_ = static_cast<uint16_t>(next_constant_ + words_needed);
 
     symbol_table_[name] = out_binding;
     uniforms_.push_back(out_binding);
@@ -80,7 +78,8 @@ bool RegisterAllocator::allocate_sampler(
     const frontend::DataType& type,
     SymbolBinding& out_binding
 ) {
-    if (next_sampler_ >= 16) {
+    uint8_t count = static_cast<uint8_t>(type.array_size > 1 ? type.array_size : 1);
+    if (static_cast<int>(next_sampler_) + count > 16) {
         return false; // Exceeded texture sampler slots (s0..s15)
     }
 
@@ -88,10 +87,10 @@ bool RegisterAllocator::allocate_sampler(
     out_binding.type = type;
     out_binding.reg_class = RegisterClass::TextureSampler;
     out_binding.base_register = next_sampler_;
-    out_binding.register_count = 1;
+    out_binding.register_count = count;
     out_binding.semantic = "";
 
-    next_sampler_++;
+    next_sampler_ = static_cast<uint8_t>(next_sampler_ + count);
 
     symbol_table_[name] = out_binding;
     samplers_.push_back(out_binding);
@@ -104,11 +103,12 @@ bool RegisterAllocator::allocate_input(
     const std::string& semantic,
     SymbolBinding& out_binding
 ) {
-    uint8_t count = static_cast<uint8_t>(type.component_count());
-    if (count == 0) count = 1;
+    uint16_t comp = static_cast<uint16_t>(type.component_count());
+    if (comp == 0) comp = 1;
+    uint16_t count = static_cast<uint16_t>(comp * (type.array_size > 1 ? type.array_size : 1));
 
-    if (next_input_ + count > 16) {
-        return false; // Limit of 16 input streams / attribute channels
+    if (static_cast<uint16_t>(next_input_) + count > 64u) {
+        return false; // Limit of 16 vec4 input attributes (64 scalar PA registers)
     }
 
     out_binding.name = name;
@@ -118,7 +118,7 @@ bool RegisterAllocator::allocate_input(
     out_binding.register_count = count;
     out_binding.semantic = semantic;
 
-    next_input_ += count;
+    next_input_ = static_cast<uint8_t>(next_input_ + count);
 
     symbol_table_[name] = out_binding;
     inputs_.push_back(out_binding);
@@ -131,10 +131,11 @@ bool RegisterAllocator::allocate_output(
     const std::string& semantic,
     SymbolBinding& out_binding
 ) {
-    uint8_t count = static_cast<uint8_t>(type.component_count());
-    if (count == 0) count = 1;
+    uint16_t comp = static_cast<uint16_t>(type.component_count());
+    if (comp == 0) comp = 1;
+    uint16_t count = static_cast<uint16_t>(comp * (type.array_size > 1 ? type.array_size : 1));
 
-    if (next_output_ + count > 16) {
+    if (static_cast<uint16_t>(next_output_) + count > 64u) {
         return false;
     }
 
@@ -145,16 +146,21 @@ bool RegisterAllocator::allocate_output(
     out_binding.register_count = count;
     out_binding.semantic = semantic;
 
-    next_output_ += count;
+    next_output_ = static_cast<uint8_t>(next_output_ + count);
 
     symbol_table_[name] = out_binding;
     outputs_.push_back(out_binding);
     return true;
 }
 
+void RegisterAllocator::alias_symbol(const std::string& alias_name, const SymbolBinding& binding) {
+    if (!alias_name.empty()) {
+        symbol_table_[alias_name] = binding;
+    }
+}
+
 HardwareRegister RegisterAllocator::allocate_temporary(uint8_t sub_index) {
     if (next_temporary_ >= 64) {
-        // Wrap or fallback
         next_temporary_ = 0;
     }
     HardwareRegister reg;
@@ -168,24 +174,24 @@ std::vector<HardwareRegister> RegisterAllocator::allocate_temporary_vector(uint8
     std::vector<HardwareRegister> regs;
     regs.reserve(component_count);
     uint8_t base = next_temporary_;
-    next_temporary_ += component_count;
-    if (next_temporary_ >= 64) {
+    if (static_cast<int>(next_temporary_) + component_count > 64) {
         base = 0;
         next_temporary_ = component_count;
+    } else {
+        next_temporary_ = static_cast<uint8_t>(next_temporary_ + component_count);
     }
 
     for (uint8_t i = 0; i < component_count; ++i) {
         HardwareRegister r;
         r.reg_class = RegisterClass::Temporary;
-        r.index = base + i;
-        r.sub_index = i % 4;
+        r.index = static_cast<uint8_t>(base + i);
+        r.sub_index = static_cast<uint8_t>(i % 4);
         regs.push_back(r);
     }
     return regs;
 }
 
 void RegisterAllocator::free_temporary([[maybe_unused]] uint8_t reg_index) {
-    // For linear scan allocator, monotonic bump with reuse after basic block
 }
 
 const SymbolBinding* RegisterAllocator::find_symbol(const std::string& name) const {
