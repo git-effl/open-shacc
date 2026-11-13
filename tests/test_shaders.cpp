@@ -2,7 +2,7 @@
  * @file test_shaders.cpp
  * @brief Clean-room automated test suite for open-shacc compiler library.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "open_shacc.h"

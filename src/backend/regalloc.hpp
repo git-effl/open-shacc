@@ -2,7 +2,7 @@
  * @file regalloc.hpp
  * @brief Linear Scan Register Allocator for USSE virtual-to-physical register binding.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_REGALLOC_HPP

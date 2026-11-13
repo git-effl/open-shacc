@@ -4,7 +4,7 @@
  *
  * Compiled as pure C to avoid C++ linkage conflicts with libstdc++.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #if defined(__vita__) || defined(__psp2__)

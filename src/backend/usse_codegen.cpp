@@ -4,7 +4,7 @@
  *
  * Clean-room implementation based on open standard USSE / SGX instruction set architecture.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "usse_codegen.hpp"

@@ -2,7 +2,7 @@
  * @file preprocessor.cpp
  * @brief Implementation of C Preprocessor for Cg / HLSL Shader Compilation.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "preprocessor.hpp"

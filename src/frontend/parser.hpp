@@ -2,7 +2,7 @@
  * @file parser.hpp
  * @brief Clean-room Recursive Descent Parser for Cg / HLSL Shader Source.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_PARSER_HPP

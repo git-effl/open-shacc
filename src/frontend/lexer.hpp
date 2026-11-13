@@ -2,7 +2,7 @@
  * @file lexer.hpp
  * @brief Lexical analyzer for NVIDIA Cg and Microsoft HLSL shader syntax.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_LEXER_HPP

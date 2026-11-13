@@ -5,7 +5,7 @@
  * Implements the identical clean-room Cg/HLSL AST parsing, linear scan register
  * allocation, USSE 32-bit microcode word generation, and 16-byte aligned GXP packaging.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 export interface Token {

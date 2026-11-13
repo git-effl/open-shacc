@@ -5,7 +5,7 @@
  * Implemented clean-room strictly from public open-source specifications (Vita3K / VitaSDK).
  * Contains no proprietary code.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_GXP_FORMAT_HPP

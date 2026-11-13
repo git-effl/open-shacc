@@ -2,7 +2,7 @@
  * @file App.tsx
  * @brief open-shacc Developer Workbench & Interactive Shader Compiler Studio.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 import React, { useState, useMemo } from 'react';

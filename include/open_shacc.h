@@ -9,7 +9,7 @@
  *   - Public Imagination Technologies USSE architecture documentation
  *   - PS Vita SceShaccCg ABI and SceGxm binary container specs
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_H

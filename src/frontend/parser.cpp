@@ -2,7 +2,7 @@
  * @file parser.cpp
  * @brief Clean-room Cg/HLSL AST parser implementation.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "parser.hpp"

@@ -2,7 +2,7 @@
  * @file gxp_encoder.hpp
  * @brief Serializer for packaging compiled shader microcode into GXP binary containers.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_GXP_ENCODER_HPP

@@ -4,7 +4,7 @@
  *
  * Clean-room implementation based on standard NVIDIA Cg language specification.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_AST_HPP

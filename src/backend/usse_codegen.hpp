@@ -2,7 +2,7 @@
  * @file usse_codegen.hpp
  * @brief USSE Target Code Generator translating AST to 64-bit microcode words.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_USSE_CODEGEN_HPP

@@ -5,7 +5,7 @@
  * Clean-room replacement for libshacccg.
  * Exports all 33 SceShaccCg library functions (NID 0xA05BBEBB) + 5 SceShaccCg wrapper functions.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "../include/open_shacc.h"

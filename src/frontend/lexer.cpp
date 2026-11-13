@@ -2,7 +2,7 @@
  * @file lexer.cpp
  * @brief Implementation of the Cg/HLSL tokenizer.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "lexer.hpp"

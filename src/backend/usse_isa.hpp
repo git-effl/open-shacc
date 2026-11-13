@@ -6,7 +6,7 @@
  * and open-source emulator decoders (Vita3K).
  * Contains no proprietary or reverse-engineered code.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_USSE_ISA_HPP

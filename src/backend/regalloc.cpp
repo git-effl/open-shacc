@@ -2,7 +2,7 @@
  * @file regalloc.cpp
  * @brief Implementation of the linear scan register allocator.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "regalloc.hpp"

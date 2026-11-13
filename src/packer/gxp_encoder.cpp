@@ -2,7 +2,7 @@
  * @file gxp_encoder.cpp
  * @brief Implementation of SceGxmProgram (GXP) Binary Container Packer.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "gxp_encoder.hpp"
