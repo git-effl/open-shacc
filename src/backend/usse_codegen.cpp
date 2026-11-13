@@ -199,12 +199,26 @@ bool UsseCodeGenerator::generate(
     if (force_fragment.has_value()) {
         is_frag = *force_fragment;
     } else {
+        bool has_position_out = semantic_contains(entry_fn->return_semantic, "POSITION");
+        for (const auto& out : reg_allocator_.get_outputs()) {
+            if (semantic_contains(out.semantic, "POSITION")) {
+                has_position_out = true;
+            }
+        }
+        if (entry_fn->return_type.base == frontend::BaseType::CustomStruct) {
+            const auto* s = tu.find_struct(entry_fn->return_type.struct_name);
+            if (s) {
+                for (const auto& field : s->fields) {
+                    if (semantic_contains(field.semantic, "POSITION")) {
+                        has_position_out = true;
+                    }
+                }
+            }
+        }
         if (semantic_contains(entry_fn->return_semantic, "COLOR") ||
             semantic_contains(entry_fn->return_semantic, "FRAG") ||
-            semantic_contains(entry_fn->return_semantic, "DEPTH")) {
-            is_frag = true;
-        }
-        if (!reg_allocator_.get_samplers().empty()) {
+            semantic_contains(entry_fn->return_semantic, "DEPTH") ||
+            (!has_position_out && !reg_allocator_.get_samplers().empty())) {
             is_frag = true;
         }
     }
@@ -232,13 +246,18 @@ bool UsseCodeGenerator::generate(
     }
 
     if (!force_fragment.has_value()) {
-        if (uses_discard_) {
-            is_frag = true;
-        }
+        bool has_position_out = semantic_contains(entry_fn->return_semantic, "POSITION");
+        bool has_color_or_depth_out = false;
         for (const auto& out : reg_allocator_.get_outputs()) {
-            if (semantic_contains(out.semantic, "COLOR") || semantic_contains(out.semantic, "DEPTH")) {
-                is_frag = true;
+            if (semantic_contains(out.semantic, "POSITION")) {
+                has_position_out = true;
             }
+            if (semantic_contains(out.semantic, "COLOR") || semantic_contains(out.semantic, "DEPTH")) {
+                has_color_or_depth_out = true;
+            }
+        }
+        if (uses_discard_ || (!has_position_out && has_color_or_depth_out)) {
+            is_frag = true;
         }
     }
 
