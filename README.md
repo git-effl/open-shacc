@@ -36,8 +36,8 @@ An open-source, clean-room replacement for the `libshacccg` Cg/HLSL shader compi
           │
           ▼
 ┌──────────────────┐
-│  USSE Codegen    │  <-- Emits 32-bit VLIW microcode words (FADD, FMUL, FMAD,
-└─────────┬────────┘      DOT3, DOT4, MOV, PHAS, HALT) with disassembly logging
+│  USSE Codegen    │  <-- Emits 64-bit SGX/USSE microcode words (VADD, VMUL,
+└─────────┬────────┘      VDP3, VDP4, VMIN, VMAX, VCOMP, VTST, BR, SMP, KILL, PHAS)
           │
           ▼
 ┌──────────────────┐
@@ -138,10 +138,10 @@ All sections are padded to 16-byte boundaries:
 
 | Offset | Section | Description |
 |---|---|---|
-| `0x00` | `GxpHeader` | Magic `"GXP\0"` (`0x00505847`), version, offsets, register counts |
-| `0x30` | Uniform Symbol Table | Maps uniform identifiers (e.g. `u_MVPMatrix`) to constant register `c` offsets |
-| `...`  | Attribute Table | Input streams, semantics (`POSITION`, `TEXCOORD0`), hardware input registers |
-| `...`  | Microcode Section | Aligned 32-bit USSE microcode instruction stream |
+| `0x00` | `SceGxmProgram` (`0x9C` B) | Magic `"GXP\0"` (`0x00505847`), version, flags, offsets, register counts |
+| `0x9C` | Varyings & Frag Descriptors | `SceGxmProgramVertexVaryings` + fragment varying attribute descriptors |
+| `...`  | Uniform & Sampler Tables | `SceGxmDependentSampler`, container descriptors (`14` / `19`), `SceGxmProgramParameter` |
+| `...`  | Microcode Section | 8-byte aligned 64-bit USSE microcode stream (container padded to 16-byte boundary) |
 
 ---
 

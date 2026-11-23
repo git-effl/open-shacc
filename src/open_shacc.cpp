@@ -70,6 +70,7 @@ struct InternalParameter {
 
     std::vector<std::unique_ptr<InternalParameter>> struct_fields;
     std::vector<std::unique_ptr<InternalParameter>> array_elements;
+    std::vector<std::unique_ptr<InternalParameter>> matrix_rows;
 
     InternalParameter* next = nullptr;
 };
@@ -288,6 +289,28 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
     InternalParameter* prev_param = nullptr;
 
     // Uniforms (Default uniform buffer container index = 14)
+    auto make_matrix_row_params = [](InternalParameter* mat_param, const open_shacc::frontend::DataType& dt, uint32_t base_reg, uint32_t row_stride) {
+        size_t rows = dt.matrix_rows();
+        size_t cols = dt.matrix_cols();
+        for (size_t r = 0; r < rows; ++r) {
+            auto rparam = std::make_unique<InternalParameter>();
+            rparam->name = mat_param->name + "[" + std::to_string(r) + "]";
+            rparam->semantic = mat_param->semantic;
+            rparam->param_class = SCE_SHACCCG_PARAMETERCLASS_VECTOR;
+            rparam->base_type = mat_param->base_type;
+            rparam->variability = SCE_SHACCCG_VARIABILITY_UNIFORM;
+            rparam->direction = SCE_SHACCCG_DIRECTION_IN;
+            rparam->layout = mat_param->layout;
+            rparam->resource_index = static_cast<uint32_t>(base_reg + r * row_stride);
+            rparam->buffer_index = 14;
+            rparam->rows = 1;
+            rparam->columns = static_cast<uint32_t>(cols);
+            rparam->vector_width = static_cast<uint32_t>(cols);
+            rparam->array_size = 1;
+            mat_param->matrix_rows.push_back(std::move(rparam));
+        }
+    };
+
     for (const auto& u : program.uniforms) {
         auto param = std::make_unique<InternalParameter>();
         param->name = u.name;
@@ -299,6 +322,38 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
         param->resource_index = u.base_register;
         param->buffer_index = 14;
         fill_dimensions(param.get(), u.type);
+
+        const uint32_t arr_count = (u.type.array_size > 1) ? u.type.array_size : 1u;
+        const uint32_t elem_stride = (arr_count > 1)
+            ? static_cast<uint32_t>(std::max<uint16_t>(1, u.allocated_words / arr_count))
+            : static_cast<uint32_t>(u.allocated_words);
+        uint32_t mat_row_stride = 4u;
+        if (u.type.is_matrix() && u.type.matrix_rows() > 0) {
+            mat_row_stride = std::max<uint32_t>(2u, elem_stride / static_cast<uint32_t>(u.type.matrix_rows()));
+            make_matrix_row_params(param.get(), u.type, u.base_register, mat_row_stride);
+        }
+        if (u.type.array_size > 1) {
+            for (uint32_t k = 0; k < arr_count; ++k) {
+                auto elem = std::make_unique<InternalParameter>();
+                elem->name = u.name + "[" + std::to_string(k) + "]";
+                elem->semantic = u.semantic;
+                elem->param_class = param->param_class;
+                elem->base_type = param->base_type;
+                elem->variability = SCE_SHACCCG_VARIABILITY_UNIFORM;
+                elem->direction = SCE_SHACCCG_DIRECTION_IN;
+                elem->layout = param->layout;
+                elem->resource_index = static_cast<uint32_t>(u.base_register + k * elem_stride);
+                elem->buffer_index = 14;
+                elem->rows = param->rows;
+                elem->columns = param->columns;
+                elem->vector_width = param->vector_width;
+                elem->array_size = 1;
+                if (u.type.is_matrix()) {
+                    make_matrix_row_params(elem.get(), u.type, elem->resource_index, mat_row_stride);
+                }
+                param->array_elements.push_back(std::move(elem));
+            }
+        }
         append_parameter(out.get(), prev_param, std::move(param));
     }
 
@@ -313,6 +368,23 @@ OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
         param->resource_index = s.base_register;
         param->buffer_index = 0;
         fill_dimensions(param.get(), s.type);
+        if (s.type.array_size > 1) {
+            for (uint32_t k = 0; k < s.type.array_size; ++k) {
+                auto elem = std::make_unique<InternalParameter>();
+                elem->name = s.name + "[" + std::to_string(k) + "]";
+                elem->param_class = SCE_SHACCCG_PARAMETERCLASS_SAMPLER;
+                elem->base_type = param->base_type;
+                elem->variability = SCE_SHACCCG_VARIABILITY_UNIFORM;
+                elem->direction = SCE_SHACCCG_DIRECTION_IN;
+                elem->resource_index = static_cast<uint32_t>(s.base_register + k);
+                elem->buffer_index = 0;
+                elem->rows = 1;
+                elem->columns = 1;
+                elem->vector_width = 1;
+                elem->array_size = 1;
+                param->array_elements.push_back(std::move(elem));
+            }
+        }
         append_parameter(out.get(), prev_param, std::move(param));
     }
 
@@ -469,9 +541,14 @@ OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetArrayParameter(SceShaccCgParamet
 }
 
 OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetRowParameter(
-    [[maybe_unused]] SceShaccCgParameter parameter,
-    [[maybe_unused]] uint32_t row
+    SceShaccCgParameter parameter,
+    uint32_t row
 ) {
+    if (!parameter) return nullptr;
+    const auto* param = static_cast<const InternalParameter*>(parameter);
+    if (row < param->matrix_rows.size()) {
+        return param->matrix_rows[row].get();
+    }
     return nullptr;
 }
 

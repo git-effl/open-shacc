@@ -48,9 +48,9 @@ std::pair<GxpParameterSemantic, uint8_t> parse_semantic(const std::string& raw_s
     }
     std::string base = upper.substr(0, idx_pos);
 
-    if (base == "POSITION" || base == "WPOS") return {GxpParameterSemantic::Position, sem_idx};
+    if (base == "POSITION" || base == "WPOS" || base == "VPOS" || base == "HPOS") return {GxpParameterSemantic::Position, sem_idx};
     if (base == "TEXCOORD")                   return {GxpParameterSemantic::Texcoord, sem_idx};
-    if (base == "COLOR" || base == "COLOR0")  return {GxpParameterSemantic::Color, sem_idx};
+    if (base == "COLOR" || base == "COL")     return {GxpParameterSemantic::Color, sem_idx};
     if (base == "NORMAL")                     return {GxpParameterSemantic::Normal, sem_idx};
     if (base == "TANGENT")                    return {GxpParameterSemantic::Tangent, sem_idx};
     if (base == "BINORMAL")                   return {GxpParameterSemantic::Binormal, sem_idx};
@@ -127,22 +127,28 @@ uint16_t pack_type_info(
     );
 }
 
-uint32_t make_attribute_info(const std::string& raw_sem) {
-    auto [sem, sem_idx] = parse_semantic(raw_sem);
+// Construct fragment SceGxmProgramAttributeDescriptor::attribute_info:
+// - Bits 15:12: 0x0..0x9 = TEXCOORD0..9, 0xA = COLOR0, 0xB = COLOR1, 0xC = FOG, 0xD = WPOS/POSITION
+// - Bits 3:0  : 0xF (PA iterator varying rather than non-dependent texture query)
+// - Bit 20    : 0x100000 for F32 COLOR0/COLOR1 iterators
+// - Bits 23:22: (component_count - 1) & 3
+uint32_t make_frag_attribute_info(const std::string& hw_sem, uint32_t comp_count) {
+    auto [sem, sem_idx] = parse_semantic(hw_sem);
+    uint32_t comps_enc = ((std::clamp<uint32_t>(comp_count, 1u, 4u) - 1u) & 3u) << 22u;
+    uint32_t id_code = 0x0000u; // Default TEXCOORD0
+
     if (sem == GxpParameterSemantic::Texcoord && sem_idx < 10) {
-        return static_cast<uint32_t>(sem_idx & 0xFu) | (0xFu << 12);
+        id_code = static_cast<uint32_t>(sem_idx) << 12u;
+    } else if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse || sem == GxpParameterSemantic::Specular) {
+        uint32_t code = (sem_idx == 1 || sem == GxpParameterSemantic::Specular) ? 0xBu : 0xAu;
+        id_code = (code << 12u) | 0x100000u; // F32 color iterator
+    } else if (sem == GxpParameterSemantic::FogCoord) {
+        id_code = 0xCu << 12u;
+    } else if (sem == GxpParameterSemantic::Position) {
+        id_code = 0xDu << 12u;
     }
-    if (sem == GxpParameterSemantic::Color) {
-        uint32_t code = (sem_idx == 1) ? 0xBu : 0xAu;
-        return 0xFu | (code << 12);
-    }
-    if (sem == GxpParameterSemantic::FogCoord) {
-        return 0xFu | (0xCu << 12);
-    }
-    if (sem == GxpParameterSemantic::Position) {
-        return 0xFu | (0xDu << 12);
-    }
-    return 0xFu | (0xFu << 12);
+
+    return id_code | comps_enc | 0xFu;
 }
 
 } // namespace
@@ -188,7 +194,8 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         pending_params.push_back(std::move(p));
     }
 
-    // Samplers
+    // Samplers + DependentSampler records (container 19)
+    std::vector<SceGxmDependentSampler> dep_samplers;
     for (const auto& s : program.samplers) {
         PendingParam p;
         p.name = s.name;
@@ -200,13 +207,23 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
             0u
         );
         p.raw.semantic = static_cast<uint8_t>(GxpParameterSemantic::None);
-        p.raw.semantic_index = 0;
+        // Bit 4 (0x10) flags samplerCUBE
+        p.raw.semantic_index = (s.type.base == frontend::BaseType::SamplerCube) ? 0x10u : 0u;
         p.raw.array_size = (s.type.array_size > 1) ? s.type.array_size : 1u;
         p.raw.resource_index = static_cast<int32_t>(s.base_register);
         pending_params.push_back(std::move(p));
+
+        uint32_t count = (s.type.array_size > 1) ? s.type.array_size : 1u;
+        for (uint32_t k = 0; k < count; ++k) {
+            uint16_t unit = static_cast<uint16_t>(s.base_register + k);
+            SceGxmDependentSampler ds{};
+            ds.resource_index_layout_offset = static_cast<uint16_t>(unit * 4u);
+            ds.sa_offset = static_cast<uint16_t>(unit * 4u);
+            dep_samplers.push_back(ds);
+        }
     }
 
-    // Vertex inputs as ATTRIBUTE parameters (and fragment inputs if not duplicate)
+    // Vertex inputs as ATTRIBUTE parameters
     if (!is_frag) {
         for (const auto& in : program.inputs) {
             PendingParam p;
@@ -237,9 +254,14 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
     const size_t frag_desc_count = is_frag ? program.inputs.size() : 0;
     const size_t frag_descs_size = frag_desc_count * sizeof(SceGxmProgramAttributeDescriptor);
 
+    const size_t dep_samplers_off = frag_descs_off + frag_descs_size;
+    const size_t dep_samplers_size = dep_samplers.size() * sizeof(SceGxmDependentSampler);
+
     const uint32_t default_ub_count = static_cast<uint32_t>(program.const_register_count);
-    const uint32_t container_count = (default_ub_count > 0) ? 1u : 0u;
-    const size_t container_off = frag_descs_off + frag_descs_size;
+    const bool has_default_ub = default_ub_count > 0;
+    const bool has_dep_samplers = !dep_samplers.empty();
+    const uint32_t container_count = (has_default_ub ? 1u : 0u) + (has_dep_samplers ? 1u : 0u);
+    const size_t container_off = dep_samplers_off + dep_samplers_size;
     const size_t container_size = container_count * sizeof(SceGxmProgramParameterContainer);
 
     const size_t params_off = container_off + container_size;
@@ -267,7 +289,7 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         uint32_t pa_mask = 0;
         for (const auto& in : program.inputs) {
             uint32_t start_reg = in.base_register / 4u;
-            uint32_t end_reg = (in.base_register + in.register_count + 3u) / 4u;
+            uint32_t end_reg = (in.base_register + std::max<uint16_t>(in.allocated_words, in.register_count) + 3u) / 4u;
             for (uint32_t r = start_reg; r < end_reg && r < 16u; ++r) {
                 pa_mask |= (1u << r);
             }
@@ -279,8 +301,10 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         uint32_t v_out2 = 0;
         for (const auto& out : program.outputs) {
             auto [sem, sem_idx] = parse_semantic(out.semantic);
-            if (sem == GxpParameterSemantic::Color) {
+            if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse) {
                 v_out1 |= (sem_idx == 1) ? 0x400u : 0x800u;
+            } else if (sem == GxpParameterSemantic::Specular) {
+                v_out1 |= 0x400u;
             } else if (sem == GxpParameterSemantic::FogCoord) {
                 v_out1 |= 0x200u;
             } else if (sem == GxpParameterSemantic::PointSize) {
@@ -307,24 +331,43 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
     for (size_t i = 0; i < frag_desc_count; ++i) {
         const auto& in = program.inputs[i];
         SceGxmProgramAttributeDescriptor desc{};
-        desc.attribute_info = make_attribute_info(in.semantic);
-        desc.size = static_cast<uint32_t>(std::clamp<size_t>(in.type.component_count(), 1, 4));
-        desc.component_type = 0; // F32
-        desc.reg_offset = in.base_register;
+        const uint32_t comps = static_cast<uint32_t>(std::clamp<size_t>(in.type.component_count(), 1, 4));
+        const uint32_t pa_words = static_cast<uint32_t>(std::clamp<size_t>(in.allocated_words, 1, 4));
+        const std::string& hw_sem = in.hw_semantic.empty() ? in.semantic : in.hw_semantic;
+
+        desc.attribute_info = make_frag_attribute_info(hw_sem, comps);
+        desc.resource_index = 0;
+        desc.size = ((pa_words - 1u) & 3u) << 4u;
+        desc.component_info = in.base_register;
         std::memcpy(out_bytes.data() + frag_descs_off + (i * sizeof(desc)), &desc, sizeof(desc));
     }
 
-    // 5. Write Default Uniform Buffer Container (container 14)
-    if (container_count > 0) {
-        SceGxmProgramParameterContainer cont{};
-        cont.container_index = 14;
-        cont.unk_02 = 0;
-        cont.base_sa_offset = 0;
-        cont.size_in_f32 = static_cast<uint16_t>(std::min<uint32_t>(default_ub_count, 0xFFFFu));
-        std::memcpy(out_bytes.data() + container_off, &cont, sizeof(cont));
+    // 5. Write Dependent Samplers Table
+    if (has_dep_samplers) {
+        std::memcpy(out_bytes.data() + dep_samplers_off, dep_samplers.data(), dep_samplers_size);
     }
 
-    // 6. Write Parameters Table + Name Strings
+    // 6. Write Containers (14 = Default UB, 19 = Dependent Sampler / Data SA space)
+    size_t cont_cursor = container_off;
+    if (has_default_ub) {
+        SceGxmProgramParameterContainer cont14{};
+        cont14.container_index = 14;
+        cont14.unk_02 = 0;
+        cont14.base_sa_offset = 0;
+        cont14.size_in_f32 = static_cast<uint16_t>(std::min<uint32_t>(default_ub_count, 0xFFFFu));
+        std::memcpy(out_bytes.data() + cont_cursor, &cont14, sizeof(cont14));
+        cont_cursor += sizeof(cont14);
+    }
+    if (has_dep_samplers) {
+        SceGxmProgramParameterContainer cont19{};
+        cont19.container_index = 19;
+        cont19.unk_02 = 0;
+        cont19.base_sa_offset = program.sampler_sa_base;
+        cont19.size_in_f32 = static_cast<uint16_t>(dep_samplers.size() * 4u);
+        std::memcpy(out_bytes.data() + cont_cursor, &cont19, sizeof(cont19));
+    }
+
+    // 7. Write Parameters Table + Name Strings
     for (size_t i = 0; i < pending_params.size(); ++i) {
         const size_t entry_off = params_off + (i * sizeof(SceGxmProgramParameter));
         SceGxmProgramParameter param = pending_params[i].raw;
@@ -337,12 +380,12 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         );
     }
 
-    // 7. Write 64-bit USSE Microcode
+    // 8. Write 64-bit USSE Microcode
     if (!program.microcode_words.empty()) {
         std::memcpy(out_bytes.data() + ucode_off, program.microcode_words.data(), ucode_raw_size);
     }
 
-    // 8. Populate SceGxmProgramHeader
+    // 9. Populate SceGxmProgramHeader
     SceGxmProgramHeader header{};
     header.magic = GXP_MAGIC;
     header.major_version = 1;
@@ -358,8 +401,12 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
 
     if (is_frag) {
         header.program_flags |= GXP_PROGRAM_FLAG_FRAGMENT;
+        header.program_flags |= GXP_PROGRAM_FLAG_NATIVECOLOR_USED; // Outputs write o0
         if (program.uses_discard) {
             header.program_flags |= GXP_PROGRAM_FLAG_DISCARD_USED;
+        }
+        if (program.uses_depth) {
+            header.program_flags |= GXP_PROGRAM_FLAG_DEPTH_USED;
         }
     }
     if (default_ub_count > 0) {
@@ -370,10 +417,15 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         for (uint32_t k = 0; k < count; ++k) {
             uint32_t unit = static_cast<uint32_t>(s.base_register) + k;
             if (unit < 16u) {
-                header.texunit_flags[unit / 8u] |= (1u << ((unit % 8u) * 4u));
+                // 0x2 = dependent sampler read matching container 19 dependent_sampler entries
+                header.texunit_flags[unit / 8u] |= (0x2u << ((unit % 8u) * 4u));
             }
         }
     }
+
+    const uint16_t total_sa_regs = has_dep_samplers
+        ? static_cast<uint16_t>(program.sampler_sa_base + dep_samplers.size() * 4u)
+        : static_cast<uint16_t>(default_ub_count);
 
     header.parameter_count = static_cast<uint32_t>(pending_params.size());
     header.parameters_offset = pending_params.empty()
@@ -382,8 +434,8 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
     header.varyings_offset = static_cast<int32_t>(varyings_off - offsetof(SceGxmProgramHeader, varyings_offset));
 
     header.primary_reg_count = std::max<uint16_t>(1, program.input_register_count);
-    header.secondary_reg_count = static_cast<uint16_t>(default_ub_count);
-    header.temp_reg_count1 = std::max<uint16_t>(1, program.temp_register_count);
+    header.secondary_reg_count = total_sa_regs;
+    header.temp_reg_count1 = std::max<uint32_t>(1, program.temp_register_count);
     header.temp_reg_count2 = 0;
     header.primary_program_phase_count = 1;
 
@@ -395,11 +447,16 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
 
     header.default_uniform_buffer_count = default_ub_count;
     header.compiler_version = 0x0350u << 4;
+
+    header.dependent_sampler_count = static_cast<uint32_t>(dep_samplers.size());
+    header.dependent_sampler_offset = has_dep_samplers
+        ? static_cast<int32_t>(dep_samplers_off - offsetof(SceGxmProgramHeader, dependent_sampler_offset))
+        : 0;
+
     header.container_count = container_count;
     header.container_offset = (container_count > 0)
         ? static_cast<int32_t>(container_off - offsetof(SceGxmProgramHeader, container_offset))
         : 0;
-    header.dependent_common_imm_offset = 0;
 
     std::memcpy(out_bytes.data() + header_off, &header, sizeof(header));
     return true;

@@ -303,6 +303,13 @@ struct ConstructExpr : public Expression {
     }
 };
 
+struct InitListExpr : public Expression {
+    std::vector<ExprPtr> elements;
+
+    explicit InitListExpr(std::vector<ExprPtr> elems)
+        : elements(std::move(elems)) {}
+};
+
 // Statements
 struct Statement {
     virtual ~Statement() = default;

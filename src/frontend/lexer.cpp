@@ -82,8 +82,10 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"fixed2",      TokenType::KwFixed2},
     {"fixed3",      TokenType::KwFixed3},
     {"fixed4",      TokenType::KwFixed4},
+    {"sampler",     TokenType::KwSampler2D},
     {"sampler1D",   TokenType::KwSampler1D},
     {"sampler2D",   TokenType::KwSampler2D},
+    {"sampler2DShadow", TokenType::KwSampler2D},
     {"sampler3D",   TokenType::KwSampler3D},
     {"samplerCUBE", TokenType::KwSamplerCube},
     {"sampler_cube",TokenType::KwSamplerCube}
@@ -194,6 +196,7 @@ Token Lexer::scan_number() {
         tok.column = start_col;
         tok.text = std::string(text);
         tok.number_value = static_cast<double>(std::strtoul(tok.text.c_str(), nullptr, 16));
+        tok.is_float = false;
         return tok;
     }
 
@@ -222,6 +225,7 @@ Token Lexer::scan_number() {
     std::string_view num_text = source_.substr(start_idx, cursor_ - start_idx);
 
     if (!is_at_end() && (peek() == 'f' || peek() == 'F' || peek() == 'h' || peek() == 'H' || peek() == 'x' || peek() == 'X')) {
+        is_float = true;
         advance();
     } else if (!is_float) {
         while (!is_at_end() && (peek() == 'u' || peek() == 'U' || peek() == 'l' || peek() == 'L')) {
@@ -235,6 +239,7 @@ Token Lexer::scan_number() {
     tok.column = start_col;
     tok.text = std::string(num_text);
     tok.number_value = std::strtod(tok.text.c_str(), nullptr);
+    tok.is_float = is_float;
     return tok;
 }
 

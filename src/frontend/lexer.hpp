@@ -81,6 +81,7 @@ struct Token {
     TokenType type = TokenType::EndOfFile;
     std::string text;
     double number_value = 0.0;
+    bool is_float = false;
     uint32_t line = 1;
     uint32_t column = 1;
 };

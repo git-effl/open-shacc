@@ -240,7 +240,27 @@ DataType Parser::parse_type() {
 std::string Parser::parse_optional_semantic() {
     if (match(TokenType::Colon)) {
         if (check(TokenType::Identifier)) {
-            return advance().text;
+            std::string sem = advance().text;
+            // Support HLSL : register(c0) / : packoffset(c0.x)
+            if (match(TokenType::OpenParen)) {
+                std::string inner;
+                int paren_depth = 1;
+                while (!is_at_end() && paren_depth > 0) {
+                    if (check(TokenType::OpenParen)) paren_depth++;
+                    else if (check(TokenType::CloseParen)) {
+                        paren_depth--;
+                        if (paren_depth == 0) {
+                            advance();
+                            break;
+                        }
+                    }
+                    inner += advance().text;
+                }
+                if (sem == "register" || sem == "packoffset") {
+                    return sem + "(" + inner + ")";
+                }
+            }
+            return sem;
         }
         error(peek(), "Expected semantic binding name after ':'");
     }
@@ -292,6 +312,11 @@ void Parser::parse_top_level_declaration(TranslationUnit& tu) {
                     global_var.name = name;
                     global_var.semantic = semantic;
                     global_var.initializer = parse_expression();
+                    if (auto* il = dynamic_cast<const InitListExpr*>(global_var.initializer.get())) {
+                        if (global_var.type.array_size <= 1 && !global_var.type.is_matrix() && !il->elements.empty()) {
+                            global_var.type.array_size = static_cast<uint32_t>(il->elements.size());
+                        }
+                    }
                     tu.globals.push_back(std::move(global_var));
                     while (match(TokenType::Comma)) {
                         std::string next_name = consume(TokenType::Identifier, "Expected global variable name").text;
@@ -648,6 +673,11 @@ StmtPtr Parser::parse_var_decl_or_assign() {
 
             if (match(TokenType::Assign)) {
                 decl->initializer = parse_expression();
+                if (auto* il = dynamic_cast<const InitListExpr*>(decl->initializer.get())) {
+                    if (decl->type.array_size <= 1 && !decl->type.is_matrix() && !il->elements.empty()) {
+                        decl->type.array_size = static_cast<uint32_t>(il->elements.size());
+                    }
+                }
             }
             decls.push_back(std::move(decl));
         } while (match(TokenType::Comma));
@@ -867,8 +897,23 @@ ExprPtr Parser::parse_postfix() {
 
 ExprPtr Parser::parse_primary() {
     if (match(TokenType::NumberLiteral)) {
-        float val = static_cast<float>(previous().number_value);
-        return std::make_unique<LiteralExpr>(val);
+        const Token& num_tok = previous();
+        if (num_tok.is_float) {
+            return std::make_unique<LiteralExpr>(static_cast<float>(num_tok.number_value));
+        }
+        return std::make_unique<LiteralExpr>(static_cast<int>(num_tok.number_value));
+    }
+
+    if (match(TokenType::OpenBrace)) {
+        std::vector<ExprPtr> elems;
+        if (!check(TokenType::CloseBrace)) {
+            do {
+                if (check(TokenType::CloseBrace)) break; // tolerate trailing comma
+                elems.push_back(parse_expression());
+            } while (match(TokenType::Comma));
+        }
+        consume(TokenType::CloseBrace, "Expected '}' closing initializer list");
+        return std::make_unique<InitListExpr>(std::move(elems));
     }
 
     if (match(TokenType::OpenParen)) {

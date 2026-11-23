@@ -562,7 +562,7 @@ export default function App() {
                       <li>Zero proprietary binary code included</li>
                       <li>No decompiled IDA Pro or Ghidra disassemblies</li>
                       <li>No copyrighted SDK headers</li>
-                      <li>Standard MIT open-source license</li>
+                      <li>GNU General Public License v2.0 (GPL-2.0-or-later)</li>
                     </ul>
                   </div>
                 </div>
