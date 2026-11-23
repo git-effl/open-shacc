@@ -1555,23 +1555,38 @@ bool UsseCodeGenerator::generate(
     if (force_fragment.has_value()) {
         is_frag = *force_fragment;
     } else {
-        bool has_pos_out = semantic_contains(entry_fn->return_semantic, "POSITION");
-        bool has_frag_out = semantic_contains(entry_fn->return_semantic, "COLOR") ||
-                            semantic_contains(entry_fn->return_semantic, "FRAG") ||
-                            semantic_contains(entry_fn->return_semantic, "DEPTH");
+        bool has_pos_out = semantic_contains(entry_fn->return_semantic, "POSITION") ||
+                           semantic_contains(entry_fn->return_semantic, "HPOS");
+        bool has_color_out = semantic_contains(entry_fn->return_semantic, "COLOR") ||
+                             semantic_contains(entry_fn->return_semantic, "FRAG");
+        bool has_depth_out = semantic_contains(entry_fn->return_semantic, "DEPTH");
 
         for (const auto& param : entry_fn->parameters) {
             if (param.is_out) {
                 if (param.type.base == frontend::BaseType::CustomStruct) {
                     if (const auto* s = tu.find_struct(param.type.struct_name)) {
                         for (const auto& f : s->fields) {
-                            if (semantic_contains(f.semantic, "POSITION")) has_pos_out = true;
-                            if (semantic_contains(f.semantic, "COLOR") || semantic_contains(f.semantic, "DEPTH")) has_frag_out = true;
+                            if (semantic_contains(f.semantic, "POSITION") || semantic_contains(f.semantic, "HPOS")) {
+                                has_pos_out = true;
+                            }
+                            if (semantic_contains(f.semantic, "COLOR") || semantic_contains(f.semantic, "FRAG")) {
+                                has_color_out = true;
+                            }
+                            if (semantic_contains(f.semantic, "DEPTH")) {
+                                has_depth_out = true;
+                            }
                         }
                     }
                 } else {
-                    if (semantic_contains(param.semantic, "POSITION")) has_pos_out = true;
-                    if (semantic_contains(param.semantic, "COLOR") || semantic_contains(param.semantic, "DEPTH")) has_frag_out = true;
+                    if (semantic_contains(param.semantic, "POSITION") || semantic_contains(param.semantic, "HPOS")) {
+                        has_pos_out = true;
+                    }
+                    if (semantic_contains(param.semantic, "COLOR") || semantic_contains(param.semantic, "FRAG")) {
+                        has_color_out = true;
+                    }
+                    if (semantic_contains(param.semantic, "DEPTH")) {
+                        has_depth_out = true;
+                    }
                 }
             }
         }
@@ -1579,14 +1594,21 @@ bool UsseCodeGenerator::generate(
         if (entry_fn->return_type.base == frontend::BaseType::CustomStruct) {
             if (const auto* s = tu.find_struct(entry_fn->return_type.struct_name)) {
                 for (const auto& f : s->fields) {
-                    if (semantic_contains(f.semantic, "POSITION")) has_pos_out = true;
-                    if (semantic_contains(f.semantic, "COLOR") || semantic_contains(f.semantic, "DEPTH")) has_frag_out = true;
+                    if (semantic_contains(f.semantic, "POSITION") || semantic_contains(f.semantic, "HPOS")) {
+                        has_pos_out = true;
+                    }
+                    if (semantic_contains(f.semantic, "COLOR") || semantic_contains(f.semantic, "FRAG")) {
+                        has_color_out = true;
+                    }
+                    if (semantic_contains(f.semantic, "DEPTH")) {
+                        has_depth_out = true;
+                    }
                 }
             }
         }
 
         bool has_discard = statement_contains_discard(entry_fn->body.get());
-        if (has_discard || has_frag_out || (!has_pos_out && !reg_allocator_.get_samplers().empty())) {
+        if (has_discard || has_depth_out || (!has_pos_out && (has_color_out || !reg_allocator_.get_samplers().empty()))) {
             is_frag = true;
         }
     }
