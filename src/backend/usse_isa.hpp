@@ -73,6 +73,7 @@ enum class UsseOpcode : uint8_t {
     SMP      = 0x14,
     DEPTHF   = 0x15,
     KILL     = 0x16,
+    SMBO     = 0x17,
     PHAS     = 0x1E,
     HALT     = 0x1F
 };
@@ -85,25 +86,41 @@ enum class ExtPredicate : uint8_t {
     P0    = 1,
     P1    = 2,
     P2    = 3,
-    PN    = 4,
+    P3    = 4,
     NegP0 = 5,
     NegP1 = 6,
-    VP0   = 7
+    PN    = 7
 };
+
+// Predicate field used specifically by V32NMAD / V16NMAD / VDP instructions
+enum class ExtVecPredicate : uint8_t {
+    None  = 0,
+    P0    = 1,
+    P1    = 2,
+    P2    = 3,
+    NegP0 = 4,
+    NegP1 = 5,
+    NegP2 = 6,
+    PN    = 7
+};
+
+constexpr ExtVecPredicate to_ext_vec_pred(ExtPredicate p) {
+    switch (p) {
+        case ExtPredicate::P0:    return ExtVecPredicate::P0;
+        case ExtPredicate::P1:    return ExtVecPredicate::P1;
+        case ExtPredicate::P2:    return ExtVecPredicate::P2;
+        case ExtPredicate::NegP0: return ExtVecPredicate::NegP0;
+        case ExtPredicate::NegP1: return ExtVecPredicate::NegP1;
+        case ExtPredicate::PN:    return ExtVecPredicate::PN;
+        default:                  return ExtVecPredicate::None;
+    }
+}
 
 enum class ShortPredicate : uint8_t {
     None  = 0,
     P0    = 1,
-    NegP0 = 2,
-    PN    = 3
-};
-
-// Predicate field encoding used specifically by the KILL special instruction
-enum class KillPredicate : uint8_t {
-    None  = 0,
-    NegP0 = 1,
-    NegP1 = 2,
-    P0    = 3
+    P1    = 2,
+    NegP0 = 3
 };
 
 // 3-bit per-channel swizzle used in V32NMAD src1_swiz (12-bit 4-component swizzle)
@@ -315,7 +332,7 @@ struct MicrocodeWord {
     }
 
     // KILL: "11111001--11000000000pp0000001101111----------------------------"
-    static MicrocodeWord encode_kill(KillPredicate kpred = KillPredicate::None) {
+    static MicrocodeWord encode_kill(ShortPredicate kpred = ShortPredicate::None) {
         using namespace detail;
         uint64_t w = 0;
         set_bits(w, 63, 59, 0b11111); // Special instruction primary opcode
@@ -324,6 +341,25 @@ struct MicrocodeWord {
         set_bits(w, 51, 43, 0ULL);    // kill = 0
         set_bits(w, 42, 41, static_cast<uint64_t>(kpred));
         set_bits(w, 40, 28, 0b0000001101111ULL); // kill2 discriminator (0x6F)
+        return MicrocodeWord(w);
+    }
+
+    // SMBO: "11111011--01-n--ddddddddddddssssssssssssrrrrrrrrrrrrcccccccccccc"
+    static MicrocodeWord encode_smbo(
+        uint16_t dest_offset = 0,
+        uint16_t src0_offset = 0,
+        uint16_t src1_offset = 0,
+        uint16_t src2_offset = 0
+    ) {
+        using namespace detail;
+        uint64_t w = 0;
+        set_bits(w, 63, 59, 0b11111); // Special instruction primary opcode
+        set_bits(w, 58, 56, 0b011);   // op2 = 3
+        set_bits(w, 53, 52, 0b01);    // opcat = 1 (SMBO)
+        set_bits(w, 47, 36, static_cast<uint64_t>(dest_offset & 0xFFFu));
+        set_bits(w, 35, 24, static_cast<uint64_t>(src0_offset & 0xFFFu));
+        set_bits(w, 23, 12, static_cast<uint64_t>(src1_offset & 0xFFFu));
+        set_bits(w, 11, 0,  static_cast<uint64_t>(src2_offset & 0xFFFu));
         return MicrocodeWord(w);
     }
 
@@ -457,7 +493,7 @@ struct MicrocodeWord {
         }
 
         set_bits(w, 63, 59, 0b00001); // op1 = V32NMAD (F32)
-        set_bits(w, 58, 56, static_cast<uint64_t>(pred));
+        set_bits(w, 58, 56, static_cast<uint64_t>(to_ext_vec_pred(pred)));
         set_bits(w, 54, 53, (src1_swiz12 >> 10) & 0x3u); // src1_swiz_10_11
         set_bit(w, 51, dest_requires_bank_ext(dst.reg_class));
         set_bit(w, 50, ((src1_swiz12 >> 9) & 0x1u) != 0); // src1_swiz_9
@@ -592,12 +628,12 @@ struct UsseInstruction {
     // Extended instruction parameters
     ExtPredicate pred = ExtPredicate::None;
     ShortPredicate short_pred = ShortPredicate::None;
-    KillPredicate kill_pred = KillPredicate::None;
     uint16_t src1_swiz12 = kSwiz12XYZW;
     Vec4Swiz src2_swiz4 = Vec4Swiz::XYZW;
     uint8_t src_comp = 0;        // VCOMP source lane (0..3)
     uint32_t imm32 = 0;          // LIMM immediate value
     int32_t branch_offset = 0;   // BR relative word offset
+    uint16_t smbo_src1_offset = 0; // SMBO src1 doubled-register offset
     uint8_t pdst_n = 0;          // VTST destination predicate (0..2)
     VtstSignTest vtst_sign = VtstSignTest::NeOrEq;
     VtstZeroTest vtst_zero = VtstZeroTest::ExcludeZero;
@@ -617,7 +653,9 @@ struct UsseInstruction {
             case UsseOpcode::HALT:
                 return MicrocodeWord::encode_phas(true);
             case UsseOpcode::KILL:
-                return MicrocodeWord::encode_kill(kill_pred);
+                return MicrocodeWord::encode_kill(short_pred);
+            case UsseOpcode::SMBO:
+                return MicrocodeWord::encode_smbo(0, 0, smbo_src1_offset, 0);
             case UsseOpcode::DEPTHF:
                 return MicrocodeWord::encode_depthf(src0, short_pred, true);
             case UsseOpcode::LIMM:
@@ -647,10 +685,10 @@ struct UsseInstruction {
                 case ExtPredicate::P0:    return "(p0) ";
                 case ExtPredicate::P1:    return "(p1) ";
                 case ExtPredicate::P2:    return "(p2) ";
-                case ExtPredicate::PN:    return "(pn) ";
+                case ExtPredicate::P3:    return "(p3) ";
                 case ExtPredicate::NegP0: return "(!p0) ";
                 case ExtPredicate::NegP1: return "(!p1) ";
-                case ExtPredicate::VP0:   return "(vp0) ";
+                case ExtPredicate::PN:    return "(pn) ";
                 default:                  return "";
             }
         };
@@ -688,6 +726,7 @@ struct UsseInstruction {
             case UsseOpcode::SMP:  ss << "SMP  " << dst.to_string() << ", " << src1.to_string() << ", sa" << sampler_sa_offset << " (s" << static_cast<int>(src0.index) << ")"; break;
             case UsseOpcode::DEPTHF: ss << "DEPTHF " << src0.to_string(); break;
             case UsseOpcode::KILL: ss << "KILL"; break;
+            case UsseOpcode::SMBO: ss << "SMBO 0, 0, " << smbo_src1_offset << ", 0"; break;
             case UsseOpcode::PHAS: ss << "PHAS ; End phase"; break;
             case UsseOpcode::HALT: ss << "HALT ; Shader termination"; break;
         }

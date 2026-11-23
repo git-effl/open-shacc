@@ -404,6 +404,7 @@ struct FunctionDecl {
 struct TranslationUnit {
     std::vector<StructDecl> structs;
     std::vector<UniformDecl> uniforms;
+    std::vector<ParameterDecl> varyings;
     std::vector<VarDeclStmt> globals;
     std::vector<FunctionDecl> functions;
 

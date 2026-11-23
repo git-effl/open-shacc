@@ -28,6 +28,20 @@ constexpr uint32_t GXP_PROGRAM_FLAG_NATIVECOLOR_USED = (1u << 6);
 // SceGxmProgram::buffer_flags bit for default uniform buffer (container 14)
 constexpr uint32_t GXP_BUFFER_FLAG_DEFAULT_UB = (1u << (14u * 2u)); // 0x10000000
 
+// GXP vertex_outputs1 bit flags
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP0  = (1u << 0);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP1  = (1u << 1);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP2  = (1u << 2);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP3  = (1u << 3);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP4  = (1u << 4);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP5  = (1u << 5);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP6  = (1u << 6);
+constexpr uint32_t GXP_VERTEX_OUTPUT_CLIP7  = (1u << 7);
+constexpr uint32_t GXP_VERTEX_OUTPUT_PSIZE  = (1u << 8);
+constexpr uint32_t GXP_VERTEX_OUTPUT_FOG    = (1u << 9);
+constexpr uint32_t GXP_VERTEX_OUTPUT_COLOR1 = (1u << 10);
+constexpr uint32_t GXP_VERTEX_OUTPUT_COLOR0 = (1u << 11);
+
 // SceGxmParameterCategory
 enum class GxpParameterCategory : uint16_t {
     Attribute        = 0,
@@ -118,16 +132,26 @@ struct SceGxmProgramHeader {
 };
 
 struct SceGxmProgramVertexVaryings {
-    uint16_t frag_output_param_type; // 0x00: Fragment: 0 (F32); Vertex: 0
-    uint16_t frag_output_comp_count; // 0x02: Fragment: 4; Vertex: 0
-    uint32_t attrib_pa_regs;         // 0x04: Vertex: PA register bitmask
-    uint32_t untyped_pa_regs;        // 0x08: Vertex: 0
-    uint32_t varyings_count;         // 0x0C: Fragment: varying descriptor count
-    uint32_t vertex_outputs1;        // 0x10: Vertex: output flags; Fragment: rel offset from here to descriptors
-    uint32_t vertex_outputs2;        // 0x14: Vertex: TEXCOORD0..9 component flags
-    uint32_t texcoord_pack_format;   // 0x18: 0
-    uint16_t semantic_index_offset;  // 0x1C: 0
-    uint16_t semantic_instance_offset;// 0x1E: 0
+    union {
+        struct {
+            uint64_t attrib_pa_regs;   // 0x00: Vertex PA register bitmask
+            uint64_t untyped_pa_regs;  // 0x08: Vertex untyped PA registers bitmask
+        } vert;
+        struct {
+            uint8_t  unk0[8];               // 0x00..0x07
+            uint8_t  fragment_output_start; // 0x08
+            uint8_t  unk1;                  // 0x09
+            uint8_t  output_param_type;     // 0x0A: GxpParameterType (0 = F32)
+            uint8_t  output_comp_count;     // 0x0B: Component count (4)
+            uint16_t varyings_count;        // 0x0C: Fragment varying descriptor count
+            uint16_t pad0;                  // 0x0E: 0
+        } frag;
+    };
+    uint32_t vertex_outputs1;          // 0x10: Vertex output flags; Frag rel offset from here to descriptors
+    uint32_t vertex_outputs2;          // 0x14: Vertex TEXCOORD0..9 component flags
+    uint32_t texcoord_pack_format;     // 0x18: 1 bit per texcoord (0=float, 1=half)
+    uint16_t semantic_index_offset;    // 0x1C: 0
+    uint16_t semantic_instance_offset; // 0x1E: 0
 };
 
 struct SceGxmProgramAttributeDescriptor {
@@ -168,6 +192,9 @@ static_assert(offsetof(SceGxmProgramHeader, default_uniform_buffer_count) == 0x6
 static_assert(offsetof(SceGxmProgramHeader, dependent_sampler_count) == 0x80, "dependent_sampler_count mismatch");
 static_assert(offsetof(SceGxmProgramHeader, container_count) == 0x90, "container_count mismatch");
 static_assert(sizeof(SceGxmProgramVertexVaryings) == 0x20, "SceGxmProgramVertexVaryings must be 0x20 bytes");
+static_assert(offsetof(SceGxmProgramVertexVaryings, vertex_outputs1) == 0x10, "vertex_outputs1 offset mismatch");
+static_assert(offsetof(SceGxmProgramVertexVaryings, vertex_outputs2) == 0x14, "vertex_outputs2 offset mismatch");
+static_assert(offsetof(SceGxmProgramVertexVaryings, texcoord_pack_format) == 0x18, "texcoord_pack_format offset mismatch");
 static_assert(sizeof(SceGxmProgramAttributeDescriptor) == 0x10, "SceGxmProgramAttributeDescriptor must be 0x10 bytes");
 static_assert(sizeof(SceGxmDependentSampler) == 0x04, "SceGxmDependentSampler must be 0x04 bytes");
 static_assert(sizeof(SceGxmProgramParameterContainer) == 0x08, "SceGxmProgramParameterContainer must be 0x08 bytes");

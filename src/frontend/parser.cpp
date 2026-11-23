@@ -270,18 +270,27 @@ std::string Parser::parse_optional_semantic() {
 void Parser::parse_top_level_declaration(TranslationUnit& tu) {
     bool is_static_or_const = false;
     bool is_varying = false;
+    bool has_in = false;
+    bool has_out = false;
     while (check(TokenType::KwConst) || check(TokenType::KwInline) ||
            check(TokenType::KwVarying) || check(TokenType::KwStatic) ||
-           check(TokenType::KwIn) || check(TokenType::KwOut)) {
+           check(TokenType::KwIn) || check(TokenType::KwOut) ||
+           check(TokenType::KwInOut)) {
         if (match(TokenType::KwConst) || match(TokenType::KwStatic)) {
             is_static_or_const = true;
         } else if (match(TokenType::KwVarying)) {
             is_varying = true;
+        } else if (match(TokenType::KwIn)) {
+            has_in = true;
+        } else if (match(TokenType::KwOut)) {
+            has_out = true;
+        } else if (match(TokenType::KwInOut)) {
+            has_in = true;
+            has_out = true;
         } else {
             advance();
         }
     }
-    (void)is_varying;
 
     if (match(TokenType::Semicolon)) {
         return;
@@ -294,6 +303,12 @@ void Parser::parse_top_level_declaration(TranslationUnit& tu) {
     } else {
         DataType type = parse_type();
         if (type.base == BaseType::Void && is_at_end()) return;
+
+        while (check(TokenType::KwIn) || check(TokenType::KwOut) || check(TokenType::KwInOut)) {
+            if (match(TokenType::KwIn)) has_in = true;
+            else if (match(TokenType::KwOut)) has_out = true;
+            else if (match(TokenType::KwInOut)) { has_in = true; has_out = true; }
+        }
 
         if (check(TokenType::Identifier)) {
             std::string name = advance().text;
@@ -336,6 +351,21 @@ void Parser::parse_top_level_declaration(TranslationUnit& tu) {
                     global_var.semantic = semantic;
                     tu.globals.push_back(std::move(global_var));
                     consume(TokenType::Semicolon, "Expected ';' after declaration");
+                } else if (is_varying || has_in || has_out) {
+                    bool eff_in = has_in || !has_out;
+                    bool eff_out = has_out;
+                    tu.varyings.push_back(ParameterDecl{type, name, semantic, eff_in, eff_out, false});
+                    while (match(TokenType::Comma)) {
+                        std::string next_name = consume(TokenType::Identifier, "Expected varying variable name").text;
+                        DataType next_type = type;
+                        next_type.array_size = 1;
+                        if (match(TokenType::OpenBracket)) {
+                            next_type.array_size = parse_array_dimension();
+                        }
+                        std::string next_sem = parse_optional_semantic();
+                        tu.varyings.push_back(ParameterDecl{next_type, next_name, next_sem, eff_in, eff_out, false});
+                    }
+                    match(TokenType::Semicolon);
                 } else {
                     tu.uniforms.push_back(UniformDecl{type, name, semantic, 0});
                     while (match(TokenType::Comma)) {

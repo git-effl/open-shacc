@@ -452,8 +452,12 @@ std::string Preprocessor::expand_line_macros(const std::string& line) {
                 if (it != macros_.end()) {
                     const auto& def = it->second;
                     if (!def.is_function_like) {
-                        new_result += def.body;
-                        changed = true;
+                        if (def.body == token) {
+                            new_result += token;
+                        } else {
+                            new_result += def.body;
+                            changed = true;
+                        }
                     } else {
                         // Check if followed by '('
                         size_t peek = i;

@@ -230,8 +230,8 @@ void UsseCodeGenerator::pop_scope() {
             reg_allocator_.erase_symbol(it->first);
         }
     }
-    for (uint8_t reg : frame.owned_vec4_temps) {
-        reg_allocator_.free_temp_vec4(reg);
+    for (auto it = frame.owned_vec4_temps.rbegin(); it != frame.owned_vec4_temps.rend(); ++it) {
+        reg_allocator_.free_temp_vec4(*it);
     }
 }
 
@@ -324,13 +324,205 @@ ValueRef UsseCodeGenerator::make_const_vec(const std::array<float, 4>& vals, uin
     return v;
 }
 
-HardwareRegister UsseCodeGenerator::to_hw_src1(const ValueRef& val, uint16_t& out_swiz12) const {
-    if (val.is_const) {
+ValueRef UsseCodeGenerator::legalize_source_value(const ValueRef& val_in) {
+    if (val_in.is_const || val_in.is_matrix || val_in.is_array) {
+        return val_in;
+    }
+
+    const uint8_t n = std::clamp<uint8_t>(val_in.count, 1, 4);
+    const uint16_t even_base = val_in.base_index & ~1u;
+    const uint8_t bias = static_cast<uint8_t>(val_in.base_index & 1u);
+    const bool is_sa = (val_in.reg_class == RegisterClass::Constant ||
+                        val_in.reg_class == RegisterClass::SecAttr ||
+                        val_in.reg_class == RegisterClass::TextureSampler);
+
+    bool need_p0 = false;
+    bool need_p1 = false;
+    bool need_p2 = false;
+    for (uint8_t i = 0; i < n; ++i) {
+        uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+        if (c < 4u) {
+            uint8_t p = static_cast<uint8_t>(c + bias);
+            if (p < 2u) need_p0 = true;
+            else if (p < 4u) need_p1 = true;
+            else need_p2 = true;
+        }
+    }
+
+    // 1. High secondary-attribute access (sa >= 128) using SMBO + VMOV + SMBO(0)
+    if (is_sa && (even_base >= 128u || (need_p2 && (even_base + 4u) >= 128u))) {
+        auto emit_sa_pair_vmov = [&](uint16_t dst_reg, uint16_t sa_pair_even, uint8_t mask) {
+            UsseInstruction smbo{};
+            smbo.opcode = UsseOpcode::SMBO;
+            smbo.smbo_src1_offset = static_cast<uint16_t>(sa_pair_even >> 1);
+            smbo.comment = "SA window offset";
+            emit_inst(std::move(smbo));
+
+            UsseInstruction mov{};
+            mov.opcode = UsseOpcode::VMOV;
+            mov.dst.reg_class = RegisterClass::Temporary;
+            mov.dst.index = static_cast<uint8_t>(dst_reg & 0xFFu);
+            mov.src0.reg_class = RegisterClass::SecAttr;
+            mov.src0.index = 0;
+            mov.write_mask = mask;
+            mov.src2_swiz4 = Vec4Swiz::XYZW;
+            mov.comment = "Load sa" + std::to_string(sa_pair_even);
+            emit_inst(std::move(mov));
+        };
+
+        ValueRef tmp = make_temp_vec4(n);
+        if (need_p0) {
+            emit_sa_pair_vmov(tmp.base_index, even_base, 0b0011);
+        }
+        if (need_p1) {
+            emit_sa_pair_vmov(static_cast<uint16_t>(tmp.base_index + 2u), static_cast<uint16_t>(even_base + 2u), 0b0011);
+        }
+        if (need_p2) {
+            if (!need_p0) {
+                emit_sa_pair_vmov(tmp.base_index, static_cast<uint16_t>(even_base + 4u), 0b0001);
+            } else {
+                ValueRef extra = make_temp_vec4(1);
+                emit_sa_pair_vmov(extra.base_index, static_cast<uint16_t>(even_base + 4u), 0b0001);
+                // Reset MOE immediately before emitting VADD lane fixups
+                UsseInstruction rst{};
+                rst.opcode = UsseOpcode::SMBO;
+                rst.smbo_src1_offset = 0;
+                rst.comment = "Reset SA window";
+                emit_inst(std::move(rst));
+
+                ValueRef packed = make_temp_vec4(n);
+                for (uint8_t i = 0; i < n; ++i) {
+                    uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+                    std::array<uint8_t, 4> map = {0, 0, 0, 0};
+                    if (c < 4u && (c + bias) >= 4u) {
+                        emit_move_mapped(RegisterClass::Temporary, packed.base_index,
+                                         static_cast<uint8_t>(1u << i), map, extra, "high sa p4");
+                    } else if (c < 4u) {
+                        map[i] = static_cast<uint8_t>(c + bias);
+                        ValueRef tmp_raw = tmp;
+                        tmp_raw.count = 4;
+                        tmp_raw.swiz = {SwizzleChannel::X, SwizzleChannel::Y, SwizzleChannel::Z, SwizzleChannel::W};
+                        emit_move_mapped(RegisterClass::Temporary, packed.base_index,
+                                         static_cast<uint8_t>(1u << i), map, tmp_raw, "high sa p0..3");
+                    } else {
+                        emit_move_mapped(RegisterClass::Temporary, packed.base_index,
+                                         static_cast<uint8_t>(1u << i), map, make_const_scalar(
+                                             c == 4 ? 0.0f : (c == 5 ? 1.0f : (c == 6 ? 2.0f : 0.5f))));
+                    }
+                }
+                packed.is_negated = val_in.is_negated;
+                packed.is_absolute = val_in.is_absolute;
+                if (n == 1) {
+                    packed.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+                }
+                return packed;
+            }
+        }
+
+        UsseInstruction rst{};
+        rst.opcode = UsseOpcode::SMBO;
+        rst.smbo_src1_offset = 0;
+        rst.comment = "Reset SA window";
+        emit_inst(std::move(rst));
+
+        for (uint8_t i = 0; i < n; ++i) {
+            uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+            if (c < 4u) {
+                uint8_t p = static_cast<uint8_t>(c + bias);
+                tmp.swiz[i] = sub_to_swiz_chan(p >= 4u ? static_cast<uint8_t>(p - 4u) : p);
+            } else {
+                tmp.swiz[i] = val_in.swiz[i];
+            }
+        }
+        for (uint8_t i = n; i < 4; ++i) {
+            tmp.swiz[i] = tmp.swiz[n - 1];
+        }
+        tmp.is_negated = val_in.is_negated;
+        tmp.is_absolute = val_in.is_absolute;
+        return tmp;
+    }
+
+    // 2. Odd-aligned cross-4-word boundary reads (bias == 1 and channel + bias >= 4)
+    if (bias != 0 && need_p2) {
+        if (!need_p0 && !need_p1) {
+            ValueRef shifted = val_in;
+            shifted.base_index = static_cast<uint16_t>(even_base + 4u);
+            for (uint8_t i = 0; i < n; ++i) {
+                uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+                if (c < 4u) {
+                    shifted.swiz[i] = sub_to_swiz_chan(static_cast<uint8_t>((c + bias) - 4u));
+                }
+            }
+            for (uint8_t i = n; i < 4; ++i) {
+                shifted.swiz[i] = shifted.swiz[n - 1];
+            }
+            return shifted;
+        }
+
+        ValueRef tmp = make_temp_vec4(n);
+        uint8_t lo_mask = 0;
+        uint8_t hi_mask = 0;
+        std::array<uint8_t, 4> lo_map = {0, 0, 0, 0};
+        std::array<uint8_t, 4> hi_map = {0, 0, 0, 0};
+        for (uint8_t i = 0; i < n; ++i) {
+            uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+            uint8_t p = (c < 4u) ? static_cast<uint8_t>(c + bias) : 0u;
+            if (c >= 4u || p < 4u) {
+                lo_mask |= static_cast<uint8_t>(1u << i);
+                lo_map[i] = i;
+            } else {
+                hi_mask |= static_cast<uint8_t>(1u << i);
+                hi_map[i] = i;
+            }
+        }
+        if (lo_mask != 0) {
+            ValueRef lo_src = val_in;
+            lo_src.is_negated = false;
+            lo_src.is_absolute = false;
+            lo_src.base_index = even_base;
+            for (uint8_t i = 0; i < n; ++i) {
+                uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+                if (c < 4u && (c + bias) < 4u) {
+                    lo_src.swiz[i] = sub_to_swiz_chan(static_cast<uint8_t>(c + bias));
+                } else if (c < 4u) {
+                    lo_src.swiz[i] = SwizzleChannel::X;
+                }
+            }
+            emit_move_mapped(RegisterClass::Temporary, tmp.base_index, lo_mask, lo_map, lo_src, "odd read lo");
+        }
+        if (hi_mask != 0) {
+            ValueRef hi_src = val_in;
+            hi_src.is_negated = false;
+            hi_src.is_absolute = false;
+            hi_src.base_index = static_cast<uint16_t>(even_base + 4u);
+            for (uint8_t i = 0; i < n; ++i) {
+                uint8_t c = static_cast<uint8_t>(val_in.swiz[i]);
+                if (c < 4u && (c + bias) >= 4u) {
+                    hi_src.swiz[i] = sub_to_swiz_chan(static_cast<uint8_t>((c + bias) - 4u));
+                } else if (c < 4u) {
+                    hi_src.swiz[i] = SwizzleChannel::X;
+                }
+            }
+            emit_move_mapped(RegisterClass::Temporary, tmp.base_index, hi_mask, hi_map, hi_src, "odd read hi");
+        }
+        tmp.is_negated = val_in.is_negated;
+        tmp.is_absolute = val_in.is_absolute;
+        if (n == 1) {
+            tmp.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+        }
+        return tmp;
+    }
+
+    return val_in;
+}
+
+HardwareRegister UsseCodeGenerator::to_hw_src1(const ValueRef& val_in, uint16_t& out_swiz12) {
+    if (val_in.is_const) {
         std::array<SwizzleChannel, 4> chs{};
         bool all_inline = true;
         for (int i = 0; i < 4; ++i) {
-            int lane = (i < val.count) ? i : (val.count - 1);
-            if (!is_inline_const_val(val.const_vals[lane], chs[i])) {
+            int lane = (i < val_in.count) ? i : (val_in.count - 1);
+            if (!is_inline_const_val(val_in.const_vals[lane], chs[i])) {
                 all_inline = false;
                 break;
             }
@@ -340,21 +532,24 @@ HardwareRegister UsseCodeGenerator::to_hw_src1(const ValueRef& val, uint16_t& ou
             HardwareRegister hw;
             hw.reg_class = RegisterClass::Temporary;
             hw.index = has_zero_reg_ ? zero_reg_index_ : 0;
-            hw.is_negated = val.is_negated;
-            hw.is_absolute = val.is_absolute;
+            hw.is_negated = val_in.is_negated;
+            hw.is_absolute = val_in.is_absolute;
             return hw;
         }
     }
 
+    ValueRef val = legalize_source_value(val_in);
     uint16_t even_base = val.base_index & ~1u;
     uint8_t bias = static_cast<uint8_t>(val.base_index & 1u);
+    uint8_t active_n = std::clamp<uint8_t>(val.count, 1, 4);
     std::array<SwizzleChannel, 4> adj = val.swiz;
-    if (bias != 0) {
-        for (int i = 0; i < 4; ++i) {
-            uint8_t c = static_cast<uint8_t>(adj[i]);
-            if (c < 4u) {
-                adj[i] = sub_to_swiz_chan(static_cast<uint8_t>(std::min<uint8_t>(3u, c + bias)));
-            }
+    for (uint8_t i = 0; i < 4; ++i) {
+        uint8_t src_slot = (i < active_n) ? i : static_cast<uint8_t>(active_n - 1);
+        uint8_t c = static_cast<uint8_t>(val.swiz[src_slot]);
+        if (c < 4u) {
+            adj[i] = sub_to_swiz_chan(static_cast<uint8_t>(std::min<uint8_t>(3u, c + bias)));
+        } else {
+            adj[i] = val.swiz[src_slot];
         }
     }
 
@@ -369,17 +564,20 @@ HardwareRegister UsseCodeGenerator::to_hw_src1(const ValueRef& val, uint16_t& ou
     return hw;
 }
 
-HardwareRegister UsseCodeGenerator::to_hw_src2(const ValueRef& val, Vec4Swiz& out_swiz4) {
-    if (!val.is_const && !val.is_negated) {
+HardwareRegister UsseCodeGenerator::to_hw_src2(const ValueRef& val_in, Vec4Swiz& out_swiz4) {
+    if (!val_in.is_const && !val_in.is_negated) {
+        ValueRef val = legalize_source_value(val_in);
         uint16_t even_base = val.base_index & ~1u;
         uint8_t bias = static_cast<uint8_t>(val.base_index & 1u);
+        uint8_t active_n = std::clamp<uint8_t>(val.count, 1, 4);
         std::array<SwizzleChannel, 4> adj = val.swiz;
-        if (bias != 0) {
-            for (int i = 0; i < 4; ++i) {
-                uint8_t c = static_cast<uint8_t>(adj[i]);
-                if (c < 4u) {
-                    adj[i] = sub_to_swiz_chan(static_cast<uint8_t>(std::min<uint8_t>(3u, c + bias)));
-                }
+        for (uint8_t i = 0; i < 4; ++i) {
+            uint8_t src_slot = (i < active_n) ? i : static_cast<uint8_t>(active_n - 1);
+            uint8_t c = static_cast<uint8_t>(val.swiz[src_slot]);
+            if (c < 4u) {
+                adj[i] = sub_to_swiz_chan(static_cast<uint8_t>(std::min<uint8_t>(3u, c + bias)));
+            } else {
+                adj[i] = val.swiz[src_slot];
             }
         }
         if (auto matched = match_vec4_swiz(adj)) {
@@ -394,7 +592,7 @@ HardwareRegister UsseCodeGenerator::to_hw_src2(const ValueRef& val, Vec4Swiz& ou
         }
     }
 
-    ValueRef tmp = materialize_to_temp(val, val.count, "Materialize src2");
+    ValueRef tmp = materialize_to_temp(val_in, val_in.count, "Materialize src2");
     out_swiz4 = (tmp.count == 1) ? Vec4Swiz::XXXX : Vec4Swiz::XYZW;
     HardwareRegister hw;
     hw.reg_class = RegisterClass::Temporary;
@@ -506,83 +704,107 @@ void UsseCodeGenerator::emit_move_mapped(
 ) {
     uint16_t dst_even = dst_base & ~1u;
     uint8_t dst_bias = static_cast<uint8_t>(dst_base & 1u);
-    uint8_t hw_mask = static_cast<uint8_t>((write_mask & 0xFu) << dst_bias) & 0xFu;
-    if (hw_mask == 0) hw_mask = 0x1u;
+    uint8_t eff_mask = write_mask & 0xFu;
+    if (eff_mask == 0) eff_mask = 0x1u;
+
+    uint8_t mask0 = 0;
+    uint8_t mask1 = 0;
+    std::array<uint8_t, 4> logical_for_p0 = {0, 0, 0, 0};
+    std::array<uint8_t, 4> logical_for_p1 = {0, 0, 0, 0};
+    for (uint8_t logical_dl = 0; logical_dl < 4; ++logical_dl) {
+        if ((eff_mask & (1u << logical_dl)) == 0) continue;
+        uint8_t phys = static_cast<uint8_t>(logical_dl + dst_bias);
+        if (phys < 4u) {
+            mask0 |= static_cast<uint8_t>(1u << phys);
+            logical_for_p0[phys] = logical_dl;
+        } else {
+            uint8_t sub1 = static_cast<uint8_t>(phys - 4u);
+            mask1 |= static_cast<uint8_t>(1u << sub1);
+            logical_for_p1[sub1] = logical_dl;
+        }
+    }
+
+    auto eval_const_lane = [&](uint8_t logical_dl) -> float {
+        uint8_t sc = target_lane_to_src_comp[logical_dl];
+        uint8_t clamped_sc = (sc < src.count) ? sc : (src.count - 1);
+        float cv = src.const_vals[clamped_sc];
+        if (src.is_absolute) cv = std::fabs(cv);
+        if (src.is_negated) cv = -cv;
+        return cv;
+    };
 
     if (src.is_const) {
-        // Check if every active target lane is an inline constant {0, 1, 2, 0.5}
-        bool all_inline = true;
-        std::array<SwizzleChannel, 4> dst_swiz = {
-            SwizzleChannel::Zero, SwizzleChannel::Zero, SwizzleChannel::Zero, SwizzleChannel::Zero
-        };
-        for (uint8_t dl = 0; dl < 4; ++dl) {
-            if ((hw_mask & (1u << dl)) == 0) continue;
-            uint8_t logical_dl = (dl >= dst_bias) ? static_cast<uint8_t>(dl - dst_bias) : 0;
-            uint8_t sc = target_lane_to_src_comp[logical_dl];
-            uint8_t clamped_sc = (sc < src.count) ? sc : (src.count - 1);
-            float cv = src.const_vals[clamped_sc];
-            if (src.is_absolute) cv = std::fabs(cv);
-            if (src.is_negated) cv = -cv;
-            if (!is_inline_const_val(cv, dst_swiz[dl])) {
-                all_inline = false;
-                break;
+        auto emit_const_chunk = [&](uint16_t chunk_even, uint8_t chunk_mask, const std::array<uint8_t, 4>& lmap) {
+            if (chunk_mask == 0) return;
+            bool all_inline = true;
+            std::array<SwizzleChannel, 4> dst_swiz = {
+                SwizzleChannel::Zero, SwizzleChannel::Zero, SwizzleChannel::Zero, SwizzleChannel::Zero
+            };
+            for (uint8_t p = 0; p < 4; ++p) {
+                if ((chunk_mask & (1u << p)) == 0) continue;
+                float cv = eval_const_lane(lmap[p]);
+                if (!is_inline_const_val(cv, dst_swiz[p])) {
+                    all_inline = false;
+                    break;
+                }
             }
-        }
-        if (all_inline) {
-            HardwareRegister zero_hw = get_zero_hw_reg();
-            UsseInstruction inst;
-            inst.opcode = UsseOpcode::VADD;
-            inst.dst.reg_class = dst_class;
-            inst.dst.index = static_cast<uint8_t>(dst_even & 0xFFu);
-            inst.src0 = zero_hw;
-            inst.src1 = zero_hw;
-            inst.write_mask = hw_mask;
-            inst.src1_swiz12 = pack_swizzle12(dst_swiz[0], dst_swiz[1], dst_swiz[2], dst_swiz[3]);
-            inst.src2_swiz4 = Vec4Swiz::XXXX;
-            inst.comment = comment;
-            emit_inst(std::move(inst));
-            return;
-        }
+            if (all_inline) {
+                HardwareRegister zero_hw = get_zero_hw_reg();
+                UsseInstruction inst;
+                inst.opcode = UsseOpcode::VADD;
+                inst.dst.reg_class = dst_class;
+                inst.dst.index = static_cast<uint8_t>(chunk_even & 0xFFu);
+                inst.src0 = zero_hw;
+                inst.src1 = zero_hw;
+                inst.write_mask = chunk_mask;
+                inst.src1_swiz12 = pack_swizzle12(dst_swiz[0], dst_swiz[1], dst_swiz[2], dst_swiz[3]);
+                inst.src2_swiz4 = Vec4Swiz::XXXX;
+                inst.comment = comment;
+                emit_inst(std::move(inst));
+                return;
+            }
+            for (uint8_t p = 0; p < 4; ++p) {
+                if ((chunk_mask & (1u << p)) == 0) continue;
+                float cv = eval_const_lane(lmap[p]);
+                ValueRef loaded = get_or_create_float_const(cv);
+                std::array<uint8_t, 4> zero_map = {0, 0, 0, 0};
+                emit_move_mapped(dst_class, static_cast<uint16_t>(chunk_even + p), 0x1u, zero_map, loaded, comment);
+            }
+        };
 
-        // Materialize each non-inline constant lane cleanly
-        for (uint8_t dl = 0; dl < 4; ++dl) {
-            if ((hw_mask & (1u << dl)) == 0) continue;
-            uint8_t logical_dl = (dl >= dst_bias) ? static_cast<uint8_t>(dl - dst_bias) : 0;
-            uint8_t sc = target_lane_to_src_comp[logical_dl];
-            uint8_t clamped_sc = (sc < src.count) ? sc : (src.count - 1);
-            float cv = src.const_vals[clamped_sc];
-            if (src.is_absolute) cv = std::fabs(cv);
-            if (src.is_negated) cv = -cv;
-            ValueRef loaded = get_or_create_float_const(cv);
-            std::array<uint8_t, 4> zero_map = {0, 0, 0, 0};
-            emit_move_mapped(dst_class, dst_base, static_cast<uint8_t>(1u << logical_dl), zero_map, loaded, comment);
-        }
+        emit_const_chunk(dst_even, mask0, logical_for_p0);
+        emit_const_chunk(static_cast<uint16_t>(dst_even + 4u), mask1, logical_for_p1);
         return;
     }
 
     uint16_t raw_swiz12 = 0;
     HardwareRegister src1_hw = to_hw_src1(src, raw_swiz12);
-    std::array<SwizzleChannel, 4> final_swiz = src1_hw.swizzle;
-    for (uint8_t dl = 0; dl < 4; ++dl) {
-        if ((hw_mask & (1u << dl)) == 0) continue;
-        uint8_t logical_dl = (dl >= dst_bias) ? static_cast<uint8_t>(dl - dst_bias) : 0;
-        uint8_t sc = target_lane_to_src_comp[logical_dl];
-        uint8_t clamped_sc = (sc < src.count) ? sc : (src.count - 1);
-        final_swiz[dl] = src1_hw.swizzle[clamped_sc];
-    }
-
     HardwareRegister zero_hw = get_zero_hw_reg();
-    UsseInstruction inst;
-    inst.opcode = UsseOpcode::VADD;
-    inst.dst.reg_class = dst_class;
-    inst.dst.index = static_cast<uint8_t>(dst_even & 0xFFu);
-    inst.src0 = src1_hw;
-    inst.src1 = zero_hw;
-    inst.write_mask = hw_mask;
-    inst.src1_swiz12 = pack_swizzle12(final_swiz[0], final_swiz[1], final_swiz[2], final_swiz[3]);
-    inst.src2_swiz4 = Vec4Swiz::XXXX;
-    inst.comment = comment;
-    emit_inst(std::move(inst));
+
+    auto emit_reg_chunk = [&](uint16_t chunk_even, uint8_t chunk_mask, const std::array<uint8_t, 4>& lmap) {
+        if (chunk_mask == 0) return;
+        std::array<SwizzleChannel, 4> final_swiz = src1_hw.swizzle;
+        for (uint8_t p = 0; p < 4; ++p) {
+            if ((chunk_mask & (1u << p)) == 0) continue;
+            uint8_t sc = target_lane_to_src_comp[lmap[p]];
+            uint8_t clamped_sc = (sc < src.count) ? sc : (src.count - 1);
+            final_swiz[p] = src1_hw.swizzle[clamped_sc];
+        }
+        UsseInstruction inst;
+        inst.opcode = UsseOpcode::VADD;
+        inst.dst.reg_class = dst_class;
+        inst.dst.index = static_cast<uint8_t>(chunk_even & 0xFFu);
+        inst.src0 = src1_hw;
+        inst.src1 = zero_hw;
+        inst.write_mask = chunk_mask;
+        inst.src1_swiz12 = pack_swizzle12(final_swiz[0], final_swiz[1], final_swiz[2], final_swiz[3]);
+        inst.src2_swiz4 = Vec4Swiz::XXXX;
+        inst.comment = comment;
+        emit_inst(std::move(inst));
+    };
+
+    emit_reg_chunk(dst_even, mask0, logical_for_p0);
+    emit_reg_chunk(static_cast<uint16_t>(dst_even + 4u), mask1, logical_for_p1);
 }
 
 ValueRef UsseCodeGenerator::emit_binary_alu(
@@ -610,10 +832,38 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
                 case frontend::BinaryOp::Mul: folded[i] = l * r; break;
                 case frontend::BinaryOp::Div: folded[i] = (r != 0.0f) ? (l / r) : 0.0f; break;
                 case frontend::BinaryOp::Mod: folded[i] = (r != 0.0f) ? std::fmod(l, r) : 0.0f; break;
+                case frontend::BinaryOp::BitAnd: folded[i] = static_cast<float>(static_cast<int32_t>(l) & static_cast<int32_t>(r)); break;
+                case frontend::BinaryOp::BitOr:  folded[i] = static_cast<float>(static_cast<int32_t>(l) | static_cast<int32_t>(r)); break;
+                case frontend::BinaryOp::BitXor: folded[i] = static_cast<float>(static_cast<int32_t>(l) ^ static_cast<int32_t>(r)); break;
+                case frontend::BinaryOp::Shl:    folded[i] = static_cast<float>(static_cast<int32_t>(l) << (static_cast<int32_t>(r) & 31)); break;
+                case frontend::BinaryOp::Shr:    folded[i] = static_cast<float>(static_cast<int32_t>(l) >> (static_cast<int32_t>(r) & 31)); break;
                 default: folded[i] = 0.0f; break;
             }
         }
         return make_const_vec(folded, n);
+    }
+
+    // Integer shift/bitwise handling when non-const
+    if (op == frontend::BinaryOp::Shl) {
+        if (rhs_in.is_const) {
+            uint32_t sh = static_cast<uint32_t>(static_cast<int32_t>(rhs_in.const_vals[0]) & 31);
+            return emit_binary_alu(frontend::BinaryOp::Mul, lhs_in, make_const_scalar(static_cast<float>(1u << sh)), "shl");
+        }
+        return lhs_in;
+    }
+    if (op == frontend::BinaryOp::Shr) {
+        if (rhs_in.is_const) {
+            uint32_t sh = static_cast<uint32_t>(static_cast<int32_t>(rhs_in.const_vals[0]) & 31);
+            return emit_floor(emit_binary_alu(frontend::BinaryOp::Mul, lhs_in,
+                                              make_const_scalar(1.0f / static_cast<float>(1u << sh)), "shr"));
+        }
+        return lhs_in;
+    }
+    if (op == frontend::BinaryOp::BitAnd || op == frontend::BinaryOp::BitOr || op == frontend::BinaryOp::BitXor) {
+        if (op == frontend::BinaryOp::BitAnd && rhs_in.is_const && rhs_in.const_vals[0] == 0.0f) {
+            return make_const_scalar(0.0f);
+        }
+        return lhs_in;
     }
 
     // 2. Division via reciprocal + multiply
@@ -746,7 +996,7 @@ ValueRef UsseCodeGenerator::emit_vcomp_vec(UsseOpcode op, const ValueRef& src_in
     }
 
     // VCOMP only reads register lanes 0..3 (no inline constant swizzles Zero/One/Two/Half)
-    ValueRef src = src_in;
+    ValueRef src = legalize_source_value(src_in);
     bool has_inline = false;
     for (uint8_t i = 0; i < n; ++i) {
         if (static_cast<uint8_t>(src.swiz[i]) >= 4u) {
@@ -863,7 +1113,7 @@ void UsseCodeGenerator::emit_vtst_p0(
     // Materialize operands into clean lane-.x scalar temps if needed
     auto prep_scalar_x = [&](const ValueRef& v) -> HardwareRegister {
         if (!v.is_const && !v.is_negated && !v.is_absolute &&
-            (v.base_index & 1u) == 0 && v.swiz[0] == SwizzleChannel::X &&
+            (v.base_index & 1u) == 0 && v.base_index < 128u && v.swiz[0] == SwizzleChannel::X &&
             (v.reg_class == RegisterClass::Temporary || v.reg_class == RegisterClass::InputAttr ||
              v.reg_class == RegisterClass::Constant || v.reg_class == RegisterClass::SecAttr)) {
             HardwareRegister r;
@@ -1170,6 +1420,186 @@ ValueRef UsseCodeGenerator::emit_sin_cos(const ValueRef& x_in, bool is_cos) {
     return emit_binary_alu(frontend::BinaryOp::Add, y, corr, is_cos ? "cos result" : "sin result");
 }
 
+ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
+    if (x.is_const) {
+        std::array<float, 4> res{};
+        for (uint8_t i = 0; i < x.count; ++i) res[i] = std::atan(x.const_vals[i]);
+        return make_const_vec(res, x.count);
+    }
+    constexpr float kHalfPi = 1.57079632679f;
+    uint8_t n = std::clamp<uint8_t>(x.count, 1, 4);
+
+    auto atan_scalar = [&](const ValueRef& sx) -> ValueRef {
+        ValueRef ax = sx;
+        ax.is_negated = false;
+        ax.is_absolute = true;
+        ValueRef inv_ax = emit_vcomp_vec(UsseOpcode::VRCP,
+                                         emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan eps"),
+                                         "atan 1/|x|");
+        ValueRef r = make_temp_vec4(1);
+        {
+            ValueRef ax_t = materialize_to_temp(ax, 1, "atan |x|");
+            ValueRef inv_t = materialize_to_temp(inv_ax, 1, "atan rcp");
+            Vec4Swiz sw4 = Vec4Swiz::XXXX; HardwareRegister hw_s2 = to_hw_src2(inv_t, sw4);
+            uint16_t sw12 = kSwiz12XYZW; HardwareRegister hw_s1 = to_hw_src1(ax_t, sw12);
+            UsseInstruction imin{};
+            imin.opcode = UsseOpcode::VMIN;
+            imin.dst.reg_class = RegisterClass::Temporary; imin.dst.index = static_cast<uint8_t>(r.base_index);
+            imin.src0 = hw_s1; imin.src1 = hw_s2; imin.write_mask = 0x1;
+            imin.src1_swiz12 = sw12; imin.src2_swiz4 = sw4;
+            emit_inst(std::move(imin));
+        }
+        ValueRef r2 = emit_binary_alu(frontend::BinaryOp::Mul, r, r, "atan r^2");
+        ValueRef p = emit_binary_alu(frontend::BinaryOp::Sub,
+                                     make_const_scalar(0.288679f),
+                                     emit_binary_alu(frontend::BinaryOp::Mul, r2, make_const_scalar(0.079331f)),
+                                     "atan p1");
+        ValueRef q = emit_binary_alu(frontend::BinaryOp::Sub,
+                                     make_const_scalar(0.995354f),
+                                     emit_binary_alu(frontend::BinaryOp::Mul, r2, p),
+                                     "atan q");
+        ValueRef mag = emit_binary_alu(frontend::BinaryOp::Mul, r, q, "atan_small");
+
+        emit_vtst_p0(ax, make_const_scalar(1.0f), VtstSignTest::GtOrGe, VtstZeroTest::ExcludeZero, "|x|>1");
+        size_t br_fold = emit_br(0, ExtPredicate::NegP0, "skip pi/2-atan");
+        ValueRef folded = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), mag, "pi/2 - atan");
+        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, folded, "atan folded");
+        patch_br(br_fold, instructions_.size());
+
+        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "x<0");
+        size_t br_sign = emit_br(0, ExtPredicate::NegP0, "skip atan neg");
+        ValueRef neg_mag = mag; neg_mag.is_negated = !neg_mag.is_negated;
+        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, neg_mag, "atan neg");
+        patch_br(br_sign, instructions_.size());
+        return mag;
+    };
+
+    if (n == 1) return atan_scalar(x);
+    ValueRef out = make_temp_vec4(n);
+    for (uint8_t c = 0; c < n; ++c) {
+        ValueRef xc = x; xc.count = 1;
+        xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
+        ValueRef ac = atan_scalar(xc);
+        std::array<uint8_t, 4> map = {0, 0, 0, 0};
+        emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "atan lane");
+    }
+    return out;
+}
+
+ValueRef UsseCodeGenerator::emit_atan2(const ValueRef& y, const ValueRef& x) {
+    uint8_t n = std::max(y.count, x.count);
+    n = std::clamp<uint8_t>(n, 1, 4);
+    if (y.is_const && x.is_const) {
+        std::array<float, 4> res{};
+        for (uint8_t i = 0; i < n; ++i) {
+            float yv = y.const_vals[i < y.count ? i : y.count - 1];
+            float xv = x.const_vals[i < x.count ? i : x.count - 1];
+            res[i] = std::atan2(yv, xv);
+        }
+        return make_const_vec(res, n);
+    }
+    constexpr float kPi = 3.14159265359f;
+    auto atan2_scalar = [&](const ValueRef& sy, const ValueRef& sx) -> ValueRef {
+        ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
+        ValueRef denom = emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan2 denom");
+        ValueRef a = materialize_to_temp(emit_atan(emit_binary_alu(frontend::BinaryOp::Div, sy, denom, "atan2 y/|x|")), 1, "atan2 a");
+
+        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 x<0");
+        size_t br_pos_x = emit_br(0, ExtPredicate::NegP0, "x >= 0");
+        emit_vtst_p0(sy, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 y<0");
+        size_t br_neg_y = emit_br(0, ExtPredicate::P0, "x<0, y<0");
+        ValueRef q2 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), a, "pi - a");
+        emit_move(RegisterClass::Temporary, a.base_index, 0x1, q2);
+        size_t br_done = emit_br(0, ExtPredicate::None, "atan2 q2 done");
+        patch_br(br_neg_y, instructions_.size());
+        ValueRef q3 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(-kPi), a, "-pi - a");
+        emit_move(RegisterClass::Temporary, a.base_index, 0x1, q3);
+        patch_br(br_done, instructions_.size());
+        patch_br(br_pos_x, instructions_.size());
+        return a;
+    };
+
+    if (n == 1) return atan2_scalar(y, x);
+    ValueRef out = make_temp_vec4(n);
+    for (uint8_t c = 0; c < n; ++c) {
+        ValueRef yc = y; yc.count = 1;
+        if (y.count > 1) yc.swiz = {y.swiz[c], y.swiz[c], y.swiz[c], y.swiz[c]};
+        ValueRef xc = x; xc.count = 1;
+        if (x.count > 1) xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
+        ValueRef ac = atan2_scalar(yc, xc);
+        std::array<uint8_t, 4> map = {0, 0, 0, 0};
+        emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "atan2 lane");
+    }
+    return out;
+}
+
+ValueRef UsseCodeGenerator::emit_acos(const ValueRef& x) {
+    if (x.is_const) {
+        std::array<float, 4> res{};
+        for (uint8_t i = 0; i < x.count; ++i) res[i] = std::acos(std::clamp(x.const_vals[i], -1.0f, 1.0f));
+        return make_const_vec(res, x.count);
+    }
+    constexpr float kPi = 3.14159265359f;
+    uint8_t n = std::clamp<uint8_t>(x.count, 1, 4);
+    auto acos_scalar = [&](const ValueRef& sx) -> ValueRef {
+        ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
+        // Clamp ax to [0, 1] via min(ax, 1.0)
+        ValueRef c_ax = make_temp_vec4(1);
+        {
+            ValueRef ax_t = materialize_to_temp(ax, 1);
+            ValueRef one_t = materialize_to_temp(make_const_scalar(1.0f), 1);
+            Vec4Swiz sw4 = Vec4Swiz::XXXX; HardwareRegister hw_s2 = to_hw_src2(one_t, sw4);
+            uint16_t sw12 = kSwiz12XYZW; HardwareRegister hw_s1 = to_hw_src1(ax_t, sw12);
+            UsseInstruction imin{};
+            imin.opcode = UsseOpcode::VMIN;
+            imin.dst.reg_class = RegisterClass::Temporary; imin.dst.index = static_cast<uint8_t>(c_ax.base_index);
+            imin.src0 = hw_s1; imin.src1 = hw_s2; imin.write_mask = 0x1;
+            imin.src1_swiz12 = sw12; imin.src2_swiz4 = sw4;
+            emit_inst(std::move(imin));
+        }
+        ValueRef poly = emit_binary_alu(frontend::BinaryOp::Sub,
+                                        make_const_scalar(0.0742610f),
+                                        emit_binary_alu(frontend::BinaryOp::Mul, c_ax, make_const_scalar(0.0187293f)));
+        poly = emit_binary_alu(frontend::BinaryOp::Add,
+                               make_const_scalar(-0.2121144f),
+                               emit_binary_alu(frontend::BinaryOp::Mul, c_ax, poly));
+        poly = emit_binary_alu(frontend::BinaryOp::Add,
+                               make_const_scalar(1.5707288f),
+                               emit_binary_alu(frontend::BinaryOp::Mul, c_ax, poly));
+        ValueRef res = materialize_to_temp(
+            emit_binary_alu(frontend::BinaryOp::Mul,
+                            emit_sqrt(emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(1.0f), c_ax)),
+                            poly, "acos poly"),
+            1, "acos res");
+        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "acos x<0");
+        size_t br_pos = emit_br(0, ExtPredicate::NegP0, "acos x>=0");
+        ValueRef mirrored = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), res, "pi - acos(|x|)");
+        emit_move(RegisterClass::Temporary, res.base_index, 0x1, mirrored);
+        patch_br(br_pos, instructions_.size());
+        return res;
+    };
+    if (n == 1) return acos_scalar(x);
+    ValueRef out = make_temp_vec4(n);
+    for (uint8_t c = 0; c < n; ++c) {
+        ValueRef xc = x; xc.count = 1;
+        xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
+        ValueRef ac = acos_scalar(xc);
+        std::array<uint8_t, 4> map = {0, 0, 0, 0};
+        emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "acos lane");
+    }
+    return out;
+}
+
+ValueRef UsseCodeGenerator::emit_asin(const ValueRef& x) {
+    if (x.is_const) {
+        std::array<float, 4> res{};
+        for (uint8_t i = 0; i < x.count; ++i) res[i] = std::asin(std::clamp(x.const_vals[i], -1.0f, 1.0f));
+        return make_const_vec(res, x.count);
+    }
+    constexpr float kHalfPi = 1.57079632679f;
+    return emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), emit_acos(x), "asin");
+}
+
 ValueRef UsseCodeGenerator::emit_matrix_mul(const ValueRef& lhs, const ValueRef& rhs) {
     // 1. Matrix * Vector
     if (lhs.is_matrix && !rhs.is_matrix) {
@@ -1418,6 +1848,61 @@ void UsseCodeGenerator::assign_value_to_lvalue(
     std::string label;
 
     if (!resolve_lvalue(lvalue, dst_cls, dst_base, dst_mask, lane_map, cur_val, label)) {
+        // Check for dynamic array element write (e.g., vClip[i] = ... or vClip[i].xy = ...)
+        const frontend::Expression* arr_expr_base = lvalue;
+        std::string tail_swiz;
+        if (auto* swiz = dynamic_cast<const frontend::SwizzleExpr*>(lvalue)) {
+            if (is_swizzle_letters(swiz->components)) {
+                tail_swiz = swiz->components;
+                arr_expr_base = swiz->target.get();
+            }
+        }
+        if (auto* arr = dynamic_cast<const frontend::ArrayAccessExpr*>(arr_expr_base)) {
+            int64_t const_idx = 0;
+            if (!eval_const_int(arr->index.get(), const_idx)) {
+                RegisterClass base_cls{};
+                uint16_t base_reg = 0;
+                uint8_t base_mask = 0xF;
+                std::array<uint8_t, 4> base_map{};
+                ValueRef base_val;
+                std::string base_lbl;
+                if (resolve_lvalue(arr->target.get(), base_cls, base_reg, base_mask, base_map, base_val, base_lbl)) {
+                    uint32_t limit = base_val.is_matrix ? base_val.mat_rows : std::min<uint32_t>(base_val.array_size, 16u);
+                    uint16_t stride = base_val.is_matrix ? base_val.row_stride : base_val.elem_stride;
+                    uint8_t write_mask = mask_for_count(base_val.count);
+                    std::array<uint8_t, 4> write_map = {0, 1, 2, 3};
+                    if (!tail_swiz.empty()) {
+                        write_mask = 0;
+                        write_map = {0, 0, 0, 0};
+                        for (size_t s = 0; s < tail_swiz.size() && s < 4; ++s) {
+                            uint8_t lane = swizzle_char_to_sub(tail_swiz[s]);
+                            write_mask |= static_cast<uint8_t>(1u << lane);
+                            write_map[lane] = static_cast<uint8_t>(s);
+                        }
+                    }
+                    ValueRef idx_val = generate_expr(arr->index.get());
+                    for (uint32_t k = 0; k < limit; ++k) {
+                        emit_vtst_p0(idx_val, make_const_scalar(static_cast<float>(k)),
+                                     VtstSignTest::NeOrEq, VtstZeroTest::IncludeZero,
+                                     base_lbl + "[" + std::to_string(k) + "] write check");
+                        size_t br_skip = emit_br(0, ExtPredicate::NegP0, "skip dyn arr write");
+                        uint16_t elem_dst = static_cast<uint16_t>(base_reg + static_cast<uint16_t>(k) * stride);
+                        ValueRef val_to_write = rhs;
+                        if (compound_op != frontend::BinaryOp::Assign) {
+                            ValueRef cur_elem = base_val;
+                            cur_elem.base_index = elem_dst;
+                            cur_elem.is_array = false;
+                            cur_elem.is_matrix = false;
+                            val_to_write = emit_binary_alu(compound_op, cur_elem, rhs, base_lbl + " dyn compound");
+                        }
+                        emit_move_mapped(base_cls, elem_dst, write_mask, write_map, val_to_write,
+                                         base_lbl + "[" + std::to_string(k) + "] write");
+                        patch_br(br_skip, instructions_.size());
+                    }
+                    return;
+                }
+            }
+        }
         return;
     }
 
@@ -1607,6 +2092,20 @@ bool UsseCodeGenerator::generate(
             }
         }
 
+        for (const auto& v : tu.varyings) {
+            if (v.is_out) {
+                if (semantic_contains(v.semantic, "POSITION") || semantic_contains(v.semantic, "HPOS")) {
+                    has_pos_out = true;
+                }
+                if (semantic_contains(v.semantic, "COLOR") || semantic_contains(v.semantic, "FRAG")) {
+                    has_color_out = true;
+                }
+                if (semantic_contains(v.semantic, "DEPTH")) {
+                    has_depth_out = true;
+                }
+            }
+        }
+
         bool has_discard = statement_contains_discard(entry_fn->body.get());
         if (has_discard || has_depth_out || (!has_pos_out && (has_color_out || !reg_allocator_.get_samplers().empty()))) {
             is_frag = true;
@@ -1614,7 +2113,7 @@ bool UsseCodeGenerator::generate(
     }
     is_fragment_ = is_frag;
 
-    // 4. Allocate non-uniform input and output parameters of entry function
+    // 4. Allocate non-uniform input and output parameters of entry function & top-level varyings
     for (const auto& param : entry_fn->parameters) {
         if (param.is_uniform || param.type.is_sampler()) continue;
 
@@ -1662,6 +2161,22 @@ bool UsseCodeGenerator::generate(
         }
     }
 
+    for (const auto& v : tu.varyings) {
+        if (v.is_uniform || v.type.is_sampler()) continue;
+        if (reg_allocator_.find_symbol(v.name)) continue;
+
+        if (v.is_out && !v.is_in) {
+            SymbolBinding binding;
+            reg_allocator_.allocate_output(v.name, v.type, v.semantic, binding);
+            if (is_frag && semantic_contains(v.semantic, "DEPTH")) {
+                uses_depth_ = true;
+            }
+        } else {
+            SymbolBinding binding;
+            reg_allocator_.allocate_input(v.name, v.type, v.semantic, binding, is_frag);
+        }
+    }
+
     // 5. Allocate outputs from entry return type
     if (entry_fn->return_type.base == frontend::BaseType::CustomStruct) {
         if (const auto* s = tu.find_struct(entry_fn->return_type.struct_name)) {
@@ -1677,6 +2192,9 @@ bool UsseCodeGenerator::generate(
     } else if (entry_fn->return_type.base != frontend::BaseType::Void) {
         SymbolBinding binding;
         std::string out_name = is_frag ? "gl_FragColor" : "gl_Position";
+        if (reg_allocator_.find_symbol(out_name)) {
+            out_name = "$entry_return";
+        }
         std::string out_sem = entry_fn->return_semantic.empty()
                             ? (is_frag ? "COLOR" : "POSITION")
                             : entry_fn->return_semantic;
@@ -1722,6 +2240,11 @@ bool UsseCodeGenerator::generate(
 
     // 9. Terminate shader cleanly with PHAS (end=true)
     emit_phase_switch();
+
+    if (reg_allocator_.has_temp_overflow()) {
+        error_message_ = "Temporary register overflow (exceeded 120 F32 scalar temporaries)";
+        return false;
+    }
 
     // 10. Assemble binary microcode words & metadata
     out_program.instructions = instructions_;
@@ -1850,9 +2373,11 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
         whole.register_count = 4;
         bind_scoped_symbol(decl->name, whole);
         if (decl->initializer) {
+            push_scope();
             ValueRef rhs = generate_expr(decl->initializer.get());
             frontend::VariableExpr lhs_var(decl->name);
             assign_value_to_lvalue(&lhs_var, frontend::BinaryOp::Assign, rhs);
+            pop_scope();
         }
         return;
     }
@@ -1873,9 +2398,11 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
             whole.reg_class = RegisterClass::Temporary;
             bind_scoped_symbol(decl->name, whole);
             if (decl->initializer) {
+                push_scope();
                 ValueRef rhs = generate_expr(decl->initializer.get());
                 frontend::VariableExpr lhs_var(decl->name);
                 assign_value_to_lvalue(&lhs_var, frontend::BinaryOp::Assign, rhs);
+                pop_scope();
             }
             return;
         }
@@ -1903,9 +2430,11 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
         if (auto* il = dynamic_cast<const frontend::InitListExpr*>(decl->initializer.get())) {
             uint8_t comp_n = static_cast<uint8_t>(std::clamp<size_t>(decl->type.component_count(), 1, 4));
             for (size_t e = 0; e < il->elements.size() && e < n_elems; ++e) {
+                push_scope();
                 ValueRef ev = generate_expr(il->elements[e].get());
                 emit_move(RegisterClass::Temporary, static_cast<uint16_t>(base + e * 4),
                           mask_for_count(comp_n), ev, decl->name + "[" + std::to_string(e) + "]");
+                pop_scope();
             }
         }
         return;
@@ -1931,6 +2460,7 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
         bind_scoped_symbol(decl->name, bind);
 
         if (decl->initializer) {
+            push_scope();
             ValueRef iv = generate_expr(decl->initializer.get());
             if (iv.is_matrix) {
                 for (uint8_t r = 0; r < rows && r < iv.mat_rows; ++r) {
@@ -1942,6 +2472,7 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
                               mask_for_count(cols), rval, decl->name + " row " + std::to_string(r));
                 }
             }
+            pop_scope();
         }
         return;
     }
@@ -1960,21 +2491,26 @@ void UsseCodeGenerator::generate_var_decl(const frontend::VarDeclStmt* decl) {
     bind_scoped_symbol(decl->name, local_bind);
 
     if (decl->initializer) {
+        push_scope();
         ValueRef init_v = generate_expr(decl->initializer.get());
         emit_move(RegisterClass::Temporary, base, mask_for_count(n), init_v, "init " + decl->name);
+        pop_scope();
     }
 }
 
 void UsseCodeGenerator::generate_assign(const frontend::AssignStmt* assign) {
     if (!assign || !assign->lvalue) return;
 
+    push_scope();
     if (!assign->rvalue) {
         generate_expr(assign->lvalue.get());
+        pop_scope();
         return;
     }
 
     ValueRef rhs = generate_expr(assign->rvalue.get());
     assign_value_to_lvalue(assign->lvalue.get(), assign->compound_op, rhs);
+    pop_scope();
 }
 
 void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
@@ -1982,6 +2518,7 @@ void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
 
     if (inline_call_ctx_.active) {
         if (ret->value && inline_call_ctx_.return_slot.has_value()) {
+            push_scope();
             ValueRef rv = generate_expr(ret->value.get());
             if (!inline_call_ctx_.return_slot->struct_name.empty() && tu_) {
                 if (const auto* s = tu_->find_struct(inline_call_ctx_.return_slot->struct_name)) {
@@ -1997,10 +2534,23 @@ void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
                         }
                     }
                 }
-            } else if (!inline_call_ctx_.return_slot->is_matrix) {
+            } else if (inline_call_ctx_.return_slot->is_matrix && rv.is_matrix) {
+                uint8_t rows = std::min(inline_call_ctx_.return_slot->mat_rows, rv.mat_rows);
+                uint8_t cols = std::min(inline_call_ctx_.return_slot->mat_cols, rv.mat_cols);
+                for (uint8_t r = 0; r < rows; ++r) {
+                    ValueRef rval;
+                    rval.reg_class = rv.reg_class;
+                    rval.base_index = static_cast<uint16_t>(rv.base_index + r * rv.row_stride);
+                    rval.count = cols;
+                    emit_move(RegisterClass::Temporary,
+                              static_cast<uint16_t>(inline_call_ctx_.return_slot->base_index + r * 4),
+                              mask_for_count(cols), rval, "helper mat return");
+                }
+            } else {
                 emit_move(RegisterClass::Temporary, inline_call_ctx_.return_slot->base_index,
                           mask_for_count(inline_call_ctx_.return_slot->count), rv, "helper return");
             }
+            pop_scope();
         }
         size_t br = emit_br(0, ExtPredicate::None, "helper return jump");
         inline_call_ctx_.return_patches.push_back(br);
@@ -2033,6 +2583,7 @@ void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
         }
     }
 
+    push_scope();
     ValueRef res = generate_expr(ret->value.get());
     uint8_t base_out = 0;
     uint8_t out_comps = static_cast<uint8_t>(std::clamp<size_t>(
@@ -2051,17 +2602,21 @@ void UsseCodeGenerator::generate_return(const frontend::ReturnStmt* ret) {
                     depth_src_reg_ = dr;
                 }
                 emit_move(RegisterClass::Temporary, depth_src_reg_->index, 0x1, res, "return DEPTH");
+                pop_scope();
                 return;
             }
         }
     }
 
     emit_move(RegisterClass::Output, base_out, mask_for_count(out_comps), res, "Shader output o" + std::to_string(base_out));
+    pop_scope();
 }
 
 void UsseCodeGenerator::generate_if(const frontend::IfStmt* if_stmt) {
     if (!if_stmt) return;
+    push_scope();
     emit_condition_to_p0(if_stmt->condition.get());
+    pop_scope();
     size_t br_to_else = emit_br(0, ExtPredicate::NegP0, "if false -> else/end");
 
     if (if_stmt->then_branch) {
@@ -2091,7 +2646,9 @@ void UsseCodeGenerator::generate_for(const frontend::ForStmt* for_stmt) {
     size_t head_idx = instructions_.size();
     std::optional<size_t> cond_br;
     if (for_stmt->condition) {
+        push_scope();
         emit_condition_to_p0(for_stmt->condition.get());
+        pop_scope();
         cond_br = emit_br(0, ExtPredicate::NegP0, "for cond false -> end");
     }
 
@@ -2129,7 +2686,9 @@ void UsseCodeGenerator::generate_while(const frontend::WhileStmt* while_stmt) {
     size_t head_idx = instructions_.size();
     std::optional<size_t> cond_br;
     if (while_stmt->condition) {
+        push_scope();
         emit_condition_to_p0(while_stmt->condition.get());
+        pop_scope();
         cond_br = emit_br(0, ExtPredicate::NegP0, "while false -> end");
     }
 
@@ -2169,7 +2728,9 @@ void UsseCodeGenerator::generate_do_while(const frontend::DoWhileStmt* dw_stmt) 
     }
 
     if (dw_stmt->condition) {
+        push_scope();
         emit_condition_to_p0(dw_stmt->condition.get());
+        pop_scope();
         emit_br(static_cast<int32_t>(body_idx) - static_cast<int32_t>(instructions_.size()), ExtPredicate::P0, "do-while loop");
     }
 
@@ -2185,7 +2746,7 @@ void UsseCodeGenerator::generate_discard(const frontend::DiscardStmt*) {
     uses_discard_ = true;
     UsseInstruction inst;
     inst.opcode = UsseOpcode::KILL;
-    inst.kill_pred = KillPredicate::None;
+    inst.short_pred = ShortPredicate::None;
     inst.comment = "discard / pixel kill";
     emit_inst(std::move(inst));
 }
@@ -2549,16 +3110,118 @@ ValueRef UsseCodeGenerator::generate_init_list(const frontend::InitListExpr* ini
     return generate_expr(init_list->elements[0].get());
 }
 
-ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* fn, const frontend::CallExpr* call) {
-    if (!fn || !fn->body || inline_depth_ >= 8) {
-        return make_const_scalar(0.0f);
+const frontend::FunctionDecl* UsseCodeGenerator::resolve_user_function(
+    const std::string& name,
+    const frontend::CallExpr* call,
+    const std::vector<ValueRef>& eval_args
+) const {
+    if (!tu_) return nullptr;
+
+    auto is_int_type = [](frontend::BaseType b) {
+        using BT = frontend::BaseType;
+        return b == BT::Int || b == BT::Int2 || b == BT::Int3 || b == BT::Int4 ||
+               b == BT::UInt || b == BT::UInt2 || b == BT::UInt3 || b == BT::UInt4 ||
+               b == BT::Short || b == BT::Short2 || b == BT::Short3 || b == BT::Short4 ||
+               b == BT::UShort || b == BT::UShort2 || b == BT::UShort3 || b == BT::UShort4 ||
+               b == BT::Char || b == BT::UChar ||
+               b == BT::Bool || b == BT::Bool2 || b == BT::Bool3 || b == BT::Bool4;
+    };
+
+    const frontend::FunctionDecl* best_fn = nullptr;
+    int best_score = -100000;
+
+    for (const auto& fdecl : tu_->functions) {
+        if (fdecl.name != name || !fdecl.body) continue;
+        if (fdecl.parameters.size() != eval_args.size()) continue;
+
+        int score = 0;
+        bool incompatible = false;
+        for (size_t i = 0; i < fdecl.parameters.size(); ++i) {
+            const auto& param = fdecl.parameters[i];
+            const auto& arg = eval_args[i];
+            const bool arg_is_sampler = (!arg.is_const && arg.reg_class == RegisterClass::TextureSampler);
+
+            if (param.type.is_sampler() || arg_is_sampler) {
+                if (param.type.is_sampler() && arg_is_sampler) {
+                    score += 100;
+                } else {
+                    incompatible = true;
+                    break;
+                }
+            } else if (param.type.is_matrix() || arg.is_matrix) {
+                if (param.type.is_matrix() && arg.is_matrix) {
+                    if (param.type.matrix_rows() == arg.mat_rows && param.type.matrix_cols() == arg.mat_cols) {
+                        score += 100;
+                    } else {
+                        incompatible = true;
+                        break;
+                    }
+                } else {
+                    incompatible = true;
+                    break;
+                }
+            } else if (param.type.base == frontend::BaseType::CustomStruct || !arg.struct_name.empty()) {
+                if (param.type.base == frontend::BaseType::CustomStruct &&
+                    param.type.struct_name == arg.struct_name) {
+                    score += 100;
+                } else {
+                    incompatible = true;
+                    break;
+                }
+            } else {
+                size_t pcomp = param.type.component_count();
+                if (pcomp == arg.count) {
+                    score += 50;
+                } else if (arg.count == 1 && pcomp > 1) {
+                    score += 5;
+                } else if (arg.count > pcomp) {
+                    score -= 20;
+                } else {
+                    incompatible = true;
+                    break;
+                }
+
+                // Prefer matching float vs int family when overloading e.g. vglMul(float4,float4) vs vglMul(int4,int4)
+                bool arg_int_hint = false;
+                if (call && i < call->arguments.size()) {
+                    if (auto* lit = dynamic_cast<const frontend::LiteralExpr*>(call->arguments[i].get())) {
+                        arg_int_hint = std::holds_alternative<int>(lit->value);
+                    } else if (auto* ve = dynamic_cast<const frontend::VariableExpr*>(call->arguments[i].get())) {
+                        if (const auto* sym = reg_allocator_.find_symbol(ve->name)) {
+                            arg_int_hint = is_int_type(sym->type.base);
+                        }
+                    }
+                }
+                if (is_int_type(param.type.base) == arg_int_hint) {
+                    score += 10;
+                }
+            }
+        }
+
+        if (!incompatible && score > best_score) {
+            best_score = score;
+            best_fn = &fdecl;
+        }
     }
 
-    // Evaluate caller arguments before pushing helper scope
-    std::vector<ValueRef> evaluated_args;
-    evaluated_args.reserve(call->arguments.size());
-    for (const auto& a : call->arguments) {
-        evaluated_args.push_back(generate_expr(a.get()));
+    if (best_fn) return best_fn;
+
+    // Fallback: first matching name/body
+    for (const auto& fdecl : tu_->functions) {
+        if (fdecl.name == name && fdecl.body) {
+            return &fdecl;
+        }
+    }
+    return nullptr;
+}
+
+ValueRef UsseCodeGenerator::invoke_user_function(
+    const frontend::FunctionDecl* fn,
+    const frontend::CallExpr* call,
+    std::vector<ValueRef> evaluated_args
+) {
+    if (!fn || !fn->body || inline_depth_ >= 8) {
+        return make_const_scalar(0.0f);
     }
 
     const frontend::FunctionDecl* saved_active_fn = active_fn_;
@@ -2589,6 +3252,23 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
         ret_val.struct_instance = ret_inst;
         ret_val.count = 4;
         inline_call_ctx_.return_slot = ret_val;
+    } else if (fn->return_type.is_matrix()) {
+        uint8_t rows = static_cast<uint8_t>(fn->return_type.matrix_rows());
+        uint8_t cols = static_cast<uint8_t>(fn->return_type.matrix_cols());
+        uint8_t rbase = reg_allocator_.allocate_contiguous_temp_vec4s(rows);
+        if (!scopes_.empty()) {
+            for (uint8_t r = 0; r < rows; ++r) {
+                scopes_.back().owned_vec4_temps.push_back(static_cast<uint8_t>(rbase + r * 4));
+            }
+        }
+        ret_val.reg_class = RegisterClass::Temporary;
+        ret_val.base_index = rbase;
+        ret_val.count = cols;
+        ret_val.is_matrix = true;
+        ret_val.mat_rows = rows;
+        ret_val.mat_cols = cols;
+        ret_val.row_stride = 4;
+        inline_call_ctx_.return_slot = ret_val;
     } else if (fn->return_type.base != frontend::BaseType::Void) {
         uint8_t rc = static_cast<uint8_t>(std::clamp<size_t>(fn->return_type.component_count(), 1, 4));
         ret_val = make_temp_vec4(rc);
@@ -2598,6 +3278,17 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
     push_scope();
     for (size_t i = 0; i < fn->parameters.size() && i < evaluated_args.size(); ++i) {
         const auto& param = fn->parameters[i];
+        if (param.type.is_sampler()) {
+            SymbolBinding sbind{};
+            sbind.name = param.name;
+            sbind.type = param.type;
+            sbind.reg_class = RegisterClass::TextureSampler;
+            sbind.base_register = evaluated_args[i].base_index;
+            sbind.register_count = 1;
+            sbind.allocated_words = 1;
+            bind_scoped_symbol(param.name, sbind);
+            continue;
+        }
         if (param.type.base == frontend::BaseType::CustomStruct && tu_) {
             if (const auto* s = tu_->find_struct(param.type.struct_name)) {
                 for (const auto& f : s->fields) {
@@ -2614,6 +3305,36 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
                 if (param.is_in) {
                     frontend::VariableExpr pvar(param.name);
                     assign_value_to_lvalue(&pvar, frontend::BinaryOp::Assign, evaluated_args[i]);
+                }
+            }
+            continue;
+        }
+        if (param.type.is_matrix()) {
+            uint8_t rows = static_cast<uint8_t>(param.type.matrix_rows());
+            uint8_t cols = static_cast<uint8_t>(param.type.matrix_cols());
+            uint8_t mbase = reg_allocator_.allocate_contiguous_temp_vec4s(rows);
+            if (!scopes_.empty()) {
+                for (uint8_t r = 0; r < rows; ++r) {
+                    scopes_.back().owned_vec4_temps.push_back(static_cast<uint8_t>(mbase + r * 4));
+                }
+            }
+            SymbolBinding pbind{};
+            pbind.name = param.name;
+            pbind.type = param.type;
+            pbind.reg_class = RegisterClass::Temporary;
+            pbind.base_register = mbase;
+            pbind.register_count = static_cast<uint16_t>(rows * 4u);
+            pbind.allocated_words = static_cast<uint16_t>(rows * 4u);
+            bind_scoped_symbol(param.name, pbind);
+            if (param.is_in && evaluated_args[i].is_matrix) {
+                const auto& marg = evaluated_args[i];
+                for (uint8_t r = 0; r < rows && r < marg.mat_rows; ++r) {
+                    ValueRef rval;
+                    rval.reg_class = marg.reg_class;
+                    rval.base_index = static_cast<uint16_t>(marg.base_index + r * marg.row_stride);
+                    rval.count = cols;
+                    emit_move(RegisterClass::Temporary, static_cast<uint16_t>(mbase + r * 4),
+                              mask_for_count(cols), rval, "arg " + param.name + " row");
                 }
             }
             continue;
@@ -2640,9 +3361,6 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
         patch_br(br, epilogue_idx);
     }
 
-    // Capture out/inout parameter register values while helper scope symbols are active,
-    // then restore caller symbol bindings BEFORE writing back to caller lvalues,
-    // then release helper temporary registers.
     struct PendingOutScalar {
         size_t arg_index;
         ValueRef val;
@@ -2671,7 +3389,6 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
         }
     }
 
-    // Restore caller's symbol table mappings while keeping helper temps alive for copyback
     if (!scopes_.empty()) {
         auto& shadowed = scopes_.back().shadowed_symbols;
         for (auto it = shadowed.rbegin(); it != shadowed.rend(); ++it) {
@@ -2714,9 +3431,16 @@ ValueRef UsseCodeGenerator::invoke_user_function(const frontend::FunctionDecl* f
 ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
     const std::string& fn = call->callee;
 
-    // 1. Texture Sampling (tex1D / tex2D / tex2Dbias / tex2Dlod / tex2Dproj / tex3D / texCUBE)
-    if (fn == "tex2D" || fn == "tex2Dbias" || fn == "tex2Dlod" ||
-        fn == "tex2Dproj" || fn == "tex1D" || fn == "tex3D" || fn == "texCUBE") {
+    // 0. VitaGL unpack/bit_cast pass-throughs (safe F32 identity when inputs are F32 floats)
+    if ((fn == "vglUnpack" || fn == "bit_cast") && !call->arguments.empty()) {
+        return generate_expr(call->arguments[0].get());
+    }
+
+    // 1. Texture Sampling (1D/2D/3D/CUBE with optional bias/lod/proj)
+    if (fn == "tex2D" || fn == "tex2Dbias" || fn == "tex2Dlod" || fn == "tex2Dproj" ||
+        fn == "tex1D" || fn == "tex1Dbias" || fn == "tex1Dlod" || fn == "tex1Dproj" ||
+        fn == "tex3D" || fn == "tex3Dbias" || fn == "tex3Dlod" || fn == "tex3Dproj" ||
+        fn == "texCUBE" || fn == "texCUBEbias" || fn == "texCUBElod" || fn == "texCUBEproj") {
         if (call->arguments.size() >= 2) {
             uint16_t samp_unit = 0;
             if (auto* var = dynamic_cast<const frontend::VariableExpr*>(call->arguments[0].get())) {
@@ -2735,31 +3459,32 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
 
             ValueRef uv = generate_expr(call->arguments[1].get());
             uint8_t dim = 1; // 2D
-            if (fn == "tex1D") dim = 0;
-            else if (fn == "tex3D" || fn == "texCUBE") dim = 2;
+            if (fn.rfind("tex1D", 0) == 0) dim = 0;
+            else if (fn.rfind("tex3D", 0) == 0 || fn.rfind("texCUBE", 0) == 0) dim = 2;
 
             uint8_t lod_mode = 0;
             ValueRef lod_val;
-            if (fn == "tex2Dbias") {
+            if (fn == "tex2Dbias" || fn == "tex1Dbias" || fn == "tex3Dbias" || fn == "texCUBEbias") {
                 lod_mode = 1;
                 lod_val = uv;
                 lod_val.swiz = {uv.swiz[3], uv.swiz[3], uv.swiz[3], uv.swiz[3]};
                 lod_val.count = 1;
                 lod_val = materialize_to_temp(lod_val, 1, "tex bias");
-            } else if (fn == "tex2Dlod") {
+            } else if (fn == "tex2Dlod" || fn == "tex1Dlod" || fn == "tex3Dlod" || fn == "texCUBElod") {
                 lod_mode = 2;
                 lod_val = uv;
                 lod_val.swiz = {uv.swiz[3], uv.swiz[3], uv.swiz[3], uv.swiz[3]};
                 lod_val.count = 1;
                 lod_val = materialize_to_temp(lod_val, 1, "tex lod");
-            } else if (fn == "tex2Dproj") {
+            } else if (fn == "tex2Dproj" || fn == "tex1Dproj" || fn == "tex3Dproj" || fn == "texCUBEproj") {
+                uint8_t proj_lane = (uv.count >= 4) ? 3 : static_cast<uint8_t>(std::max<int>(0, static_cast<int>(uv.count) - 1));
                 ValueRef w_sc = uv;
                 w_sc.count = 1;
-                w_sc.swiz = {uv.swiz[3], uv.swiz[3], uv.swiz[3], uv.swiz[3]};
-                ValueRef w_rcp = emit_vcomp_vec(UsseOpcode::VRCP, w_sc, "tex2Dproj 1/w");
-                ValueRef uv_xyz = uv;
-                uv_xyz.count = 3;
-                uv = emit_binary_alu(frontend::BinaryOp::Mul, uv_xyz, w_rcp, "tex2Dproj uv/w");
+                w_sc.swiz = {uv.swiz[proj_lane], uv.swiz[proj_lane], uv.swiz[proj_lane], uv.swiz[proj_lane]};
+                ValueRef w_rcp = emit_vcomp_vec(UsseOpcode::VRCP, w_sc, "texproj 1/w");
+                ValueRef uv_coords = uv;
+                uv_coords.count = static_cast<uint8_t>(std::max<int>(1, static_cast<int>(uv.count) - 1));
+                uv = emit_binary_alu(frontend::BinaryOp::Mul, uv_coords, w_rcp, "texproj uv/w");
             }
 
             // Ensure UV is in an even-aligned TEMP or PRIMATTR with natural xyzw swizzle
@@ -3181,6 +3906,25 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         ValueRef x = generate_expr(call->arguments[0].get());
         return emit_binary_alu(frontend::BinaryOp::Div, emit_sin_cos(x, false), emit_sin_cos(x, true), "tan");
     }
+    if (fn == "atan" && !call->arguments.empty()) {
+        if (call->arguments.size() >= 2) {
+            return emit_atan2(generate_expr(call->arguments[0].get()), generate_expr(call->arguments[1].get()));
+        }
+        return emit_atan(generate_expr(call->arguments[0].get()));
+    }
+    if (fn == "atan2" && call->arguments.size() >= 2) {
+        return emit_atan2(generate_expr(call->arguments[0].get()), generate_expr(call->arguments[1].get()));
+    }
+    if (fn == "asin" && !call->arguments.empty()) return emit_asin(generate_expr(call->arguments[0].get()));
+    if (fn == "acos" && !call->arguments.empty()) return emit_acos(generate_expr(call->arguments[0].get()));
+    if (fn == "radians" && !call->arguments.empty()) {
+        return emit_binary_alu(frontend::BinaryOp::Mul, generate_expr(call->arguments[0].get()),
+                               make_const_scalar(0.01745329251f), "radians");
+    }
+    if (fn == "degrees" && !call->arguments.empty()) {
+        return emit_binary_alu(frontend::BinaryOp::Mul, generate_expr(call->arguments[0].get()),
+                               make_const_scalar(57.2957795131f), "degrees");
+    }
     if (fn == "sincos" && call->arguments.size() >= 3) {
         ValueRef x = generate_expr(call->arguments[0].get());
         assign_value_to_lvalue(call->arguments[1].get(), frontend::BinaryOp::Assign, emit_sin_cos(x, false));
@@ -3251,20 +3995,24 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             emit_vtst_p0(xc, zero, VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "clip < 0");
             UsseInstruction kinst;
             kinst.opcode = UsseOpcode::KILL;
-            kinst.kill_pred = KillPredicate::P0;
+            kinst.short_pred = ShortPredicate::P0;
             kinst.comment = "clip kill";
             emit_inst(std::move(kinst));
         }
         return make_const_scalar(0.0f);
     }
 
-    // 6. User-defined helper function lookup & inline expansion
+    // 6. User-defined helper function lookup with overload resolution & inline expansion
     if (tu_) {
-        for (const auto& fdecl : tu_->functions) {
-            if (fdecl.name == fn && fdecl.body) {
-                return invoke_user_function(&fdecl, call);
-            }
+        std::vector<ValueRef> eval_args;
+        eval_args.reserve(call->arguments.size());
+        for (const auto& a : call->arguments) {
+            eval_args.push_back(generate_expr(a.get()));
         }
+        if (const auto* target_fn = resolve_user_function(fn, call, eval_args)) {
+            return invoke_user_function(target_fn, call, std::move(eval_args));
+        }
+        return eval_args.empty() ? make_const_scalar(0.0f) : eval_args.back();
     }
 
     // Fallback: evaluate arguments cleanly

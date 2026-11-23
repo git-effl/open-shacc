@@ -26,16 +26,31 @@ uint32_t fnv1a_32(const void* data, size_t len, uint32_t seed = 0x811C9DC5u) {
     return h;
 }
 
-std::pair<GxpParameterSemantic, uint8_t> parse_semantic(const std::string& raw_sem) {
-    if (raw_sem.empty()) {
-        return {GxpParameterSemantic::None, 0};
-    }
-
+std::string normalize_semantic_upper(const std::string& raw_sem, bool* out_is_half = nullptr, bool* out_is_centroid = nullptr) {
     std::string upper;
     upper.reserve(raw_sem.size());
     for (char c : raw_sem) {
         upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
     }
+    auto strip_suffix = [&](const char* suffix, bool* flag) {
+        size_t slen = std::strlen(suffix);
+        if (upper.size() > slen && upper.compare(upper.size() - slen, slen, suffix) == 0) {
+            upper.resize(upper.size() - slen);
+            if (flag) *flag = true;
+        }
+    };
+    strip_suffix("_CENTROID", out_is_centroid);
+    strip_suffix("_HALF", out_is_half);
+    strip_suffix("_CENTROID", out_is_centroid);
+    return upper;
+}
+
+std::pair<GxpParameterSemantic, uint8_t> parse_semantic(const std::string& raw_sem) {
+    if (raw_sem.empty()) {
+        return {GxpParameterSemantic::None, 0};
+    }
+
+    std::string upper = normalize_semantic_upper(raw_sem);
 
     size_t idx_pos = upper.size();
     while (idx_pos > 0 && std::isdigit(static_cast<unsigned char>(upper[idx_pos - 1]))) {
@@ -54,7 +69,7 @@ std::pair<GxpParameterSemantic, uint8_t> parse_semantic(const std::string& raw_s
     if (base == "NORMAL")                     return {GxpParameterSemantic::Normal, sem_idx};
     if (base == "TANGENT")                    return {GxpParameterSemantic::Tangent, sem_idx};
     if (base == "BINORMAL")                   return {GxpParameterSemantic::Binormal, sem_idx};
-    if (base == "FOG" || base == "FOGCOORD")  return {GxpParameterSemantic::FogCoord, sem_idx};
+    if (base == "FOG" || base == "FOGC" || base == "FOGCOORD") return {GxpParameterSemantic::FogCoord, sem_idx};
     if (base == "PSIZE" || base == "POINTSIZE") return {GxpParameterSemantic::PointSize, sem_idx};
     if (base == "BLENDINDICES")               return {GxpParameterSemantic::BlendIndices, sem_idx};
     if (base == "BLENDWEIGHT")                return {GxpParameterSemantic::BlendWeight, sem_idx};
@@ -63,6 +78,23 @@ std::pair<GxpParameterSemantic, uint8_t> parse_semantic(const std::string& raw_s
     if (base == "ATTR")                       return {GxpParameterSemantic::Attr, sem_idx};
     if (base == "BCOL")                       return {GxpParameterSemantic::Bcol, sem_idx};
     return {GxpParameterSemantic::None, sem_idx};
+}
+
+bool parse_clip_semantic(const std::string& raw_sem, uint8_t& out_idx) {
+    std::string upper = normalize_semantic_upper(raw_sem);
+    size_t idx_pos = upper.size();
+    while (idx_pos > 0 && std::isdigit(static_cast<unsigned char>(upper[idx_pos - 1]))) {
+        --idx_pos;
+    }
+    std::string base = upper.substr(0, idx_pos);
+    if ((base == "CLP" || base == "CLIP" || base == "CLIPDISTANCE") && idx_pos < upper.size()) {
+        int idx = std::atoi(upper.substr(idx_pos).c_str());
+        if (idx >= 0 && idx < 8) {
+            out_idx = static_cast<uint8_t>(idx);
+            return true;
+        }
+    }
+    return false;
 }
 
 GxpParameterType data_type_to_gxp_type(const frontend::DataType& dt) {
@@ -129,23 +161,35 @@ uint16_t pack_type_info(
 
 // Construct fragment SceGxmProgramAttributeDescriptor::attribute_info:
 // - Bits 15:12: 0x0..0x9 = TEXCOORD0..9, 0xA = COLOR0, 0xB = COLOR1, 0xC = FOG, 0xD = WPOS/POSITION
-// - Bits 3:0  : 0xF (PA iterator varying rather than non-dependent texture query)
+// - Bit 30    : 0x40000000 = SPRITECOORD / POINTCOORD
+// - Bit 29    : 0x20000000 = F16 (_HALF) iterator
 // - Bit 20    : 0x100000 for F32 COLOR0/COLOR1 iterators
 // - Bits 23:22: (component_count - 1) & 3
-uint32_t make_frag_attribute_info(const std::string& hw_sem, uint32_t comp_count) {
-    auto [sem, sem_idx] = parse_semantic(hw_sem);
+// - Bits 3:0  : 0xF (PA iterator varying rather than non-dependent texture query)
+uint32_t make_frag_attribute_info(const std::string& hw_sem, uint32_t comp_count, bool is_f16_type) {
+    bool is_half_sem = false;
+    std::string upper = normalize_semantic_upper(hw_sem, &is_half_sem);
     uint32_t comps_enc = ((std::clamp<uint32_t>(comp_count, 1u, 4u) - 1u) & 3u) << 22u;
+    if (upper == "SPRITECOORD" || upper == "POINTCOORD") {
+        return 0x40000000u | (is_half_sem || is_f16_type ? 0x20000000u : 0u) | comps_enc | 0xFu;
+    }
+
+    auto [sem, sem_idx] = parse_semantic(hw_sem);
     uint32_t id_code = 0x0000u; // Default TEXCOORD0
 
     if (sem == GxpParameterSemantic::Texcoord && sem_idx < 10) {
         id_code = static_cast<uint32_t>(sem_idx) << 12u;
     } else if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse || sem == GxpParameterSemantic::Specular) {
         uint32_t code = (sem_idx == 1 || sem == GxpParameterSemantic::Specular) ? 0xBu : 0xAu;
-        id_code = (code << 12u) | 0x100000u; // F32 color iterator
+        id_code = (code << 12u) | ((is_half_sem || is_f16_type) ? 0u : 0x100000u);
     } else if (sem == GxpParameterSemantic::FogCoord) {
         id_code = 0xCu << 12u;
     } else if (sem == GxpParameterSemantic::Position) {
         id_code = 0xDu << 12u;
+    }
+
+    if ((is_half_sem || is_f16_type) && sem != GxpParameterSemantic::Position) {
+        id_code |= 0x20000000u;
     }
 
     return id_code | comps_enc | 0xFu;
@@ -285,47 +329,63 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
 
     // 3. Populate Varyings struct
     SceGxmProgramVertexVaryings varyings{};
+    bool uses_spritecoord = false;
     if (!is_frag) {
-        uint32_t pa_mask = 0;
+        uint64_t pa_mask = 0;
         for (const auto& in : program.inputs) {
             uint32_t start_reg = in.base_register / 4u;
             uint32_t end_reg = (in.base_register + std::max<uint16_t>(in.allocated_words, in.register_count) + 3u) / 4u;
-            for (uint32_t r = start_reg; r < end_reg && r < 16u; ++r) {
-                pa_mask |= (1u << r);
+            for (uint32_t r = start_reg; r < end_reg && r < 64u; ++r) {
+                pa_mask |= (1ULL << r);
             }
         }
-        varyings.attrib_pa_regs = pa_mask;
-        varyings.untyped_pa_regs = 0;
+        varyings.vert.attrib_pa_regs = pa_mask;
+        varyings.vert.untyped_pa_regs = 0;
 
         uint32_t v_out1 = 0;
         uint32_t v_out2 = 0;
+        uint32_t tc_pack = 0;
         for (const auto& out : program.outputs) {
+            uint8_t clip_idx = 0;
+            if (parse_clip_semantic(out.semantic, clip_idx)) {
+                uint32_t count = (out.type.array_size > 1) ? out.type.array_size : 1u;
+                for (uint32_t c = 0; c < count && (clip_idx + c) < 8u; ++c) {
+                    v_out1 |= (1u << (clip_idx + c));
+                }
+                continue;
+            }
+            bool is_half_sem = false;
+            normalize_semantic_upper(out.semantic, &is_half_sem);
             auto [sem, sem_idx] = parse_semantic(out.semantic);
             if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse) {
-                v_out1 |= (sem_idx == 1) ? 0x400u : 0x800u;
+                v_out1 |= (sem_idx == 1) ? GXP_VERTEX_OUTPUT_COLOR1 : GXP_VERTEX_OUTPUT_COLOR0;
             } else if (sem == GxpParameterSemantic::Specular) {
-                v_out1 |= 0x400u;
+                v_out1 |= GXP_VERTEX_OUTPUT_COLOR1;
             } else if (sem == GxpParameterSemantic::FogCoord) {
-                v_out1 |= 0x200u;
+                v_out1 |= GXP_VERTEX_OUTPUT_FOG;
             } else if (sem == GxpParameterSemantic::PointSize) {
-                v_out1 |= 0x100u;
+                v_out1 |= GXP_VERTEX_OUTPUT_PSIZE;
             } else if (sem == GxpParameterSemantic::Texcoord && sem_idx < 10) {
                 size_t comp = std::clamp<size_t>(out.type.component_count(), 2, 4);
                 uint32_t bits = (comp == 2) ? 1u : ((comp == 3) ? 3u : 7u);
                 v_out2 |= (bits << (sem_idx * 3u));
+                if (is_half_sem || data_type_to_gxp_type(out.type) == GxpParameterType::F16) {
+                    tc_pack |= (1u << sem_idx);
+                }
             }
         }
         varyings.vertex_outputs1 = v_out1;
         varyings.vertex_outputs2 = v_out2;
+        varyings.texcoord_pack_format = tc_pack;
     } else {
-        varyings.frag_output_param_type = 0; // F32
-        varyings.frag_output_comp_count = 4;
-        varyings.varyings_count = static_cast<uint32_t>(frag_desc_count);
+        varyings.frag.output_param_type = 0; // F32
+        varyings.frag.output_comp_count = 4;
+        varyings.frag.varyings_count = static_cast<uint16_t>(frag_desc_count);
         // Offset from &varyings.vertex_outputs1 (varyings_off + 0x10) to frag_descs_off (varyings_off + 0x20)
         varyings.vertex_outputs1 = (frag_desc_count > 0) ? 16u : 0u;
         varyings.vertex_outputs2 = 0;
+        varyings.texcoord_pack_format = 0;
     }
-    std::memcpy(out_bytes.data() + varyings_off, &varyings, sizeof(varyings));
 
     // 4. Write Fragment Varying Descriptors
     for (size_t i = 0; i < frag_desc_count; ++i) {
@@ -334,13 +394,25 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         const uint32_t comps = static_cast<uint32_t>(std::clamp<size_t>(in.type.component_count(), 1, 4));
         const uint32_t pa_words = static_cast<uint32_t>(std::clamp<size_t>(in.allocated_words, 1, 4));
         const std::string& hw_sem = in.hw_semantic.empty() ? in.semantic : in.hw_semantic;
+        const bool is_f16 = (data_type_to_gxp_type(in.type) == GxpParameterType::F16);
 
-        desc.attribute_info = make_frag_attribute_info(hw_sem, comps);
+        bool is_half_sem = false;
+        std::string up_sem = normalize_semantic_upper(hw_sem, &is_half_sem);
+        if (up_sem == "SPRITECOORD" || up_sem == "POINTCOORD") {
+            uses_spritecoord = true;
+        }
+        auto [sem, sem_idx] = parse_semantic(hw_sem);
+        if (sem == GxpParameterSemantic::Texcoord && sem_idx < 10 && (is_half_sem || is_f16)) {
+            varyings.texcoord_pack_format |= (1u << sem_idx);
+        }
+
+        desc.attribute_info = make_frag_attribute_info(hw_sem, comps, is_f16);
         desc.resource_index = 0;
         desc.size = ((pa_words - 1u) & 3u) << 4u;
         desc.component_info = in.base_register;
         std::memcpy(out_bytes.data() + frag_descs_off + (i * sizeof(desc)), &desc, sizeof(desc));
     }
+    std::memcpy(out_bytes.data() + varyings_off, &varyings, sizeof(varyings));
 
     // 5. Write Dependent Samplers Table
     if (has_dep_samplers) {
@@ -407,6 +479,9 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         }
         if (program.uses_depth) {
             header.program_flags |= GXP_PROGRAM_FLAG_DEPTH_USED;
+        }
+        if (uses_spritecoord) {
+            header.program_flags |= GXP_PROGRAM_FLAG_SPRITECOORD;
         }
     }
     if (default_ub_count > 0) {

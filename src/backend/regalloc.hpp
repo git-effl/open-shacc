@@ -47,7 +47,7 @@ public:
     bool allocate_output(const std::string& name, const frontend::DataType& type, const std::string& semantic, SymbolBinding& out_binding);
 
     // Reorder and re-assign vertex output registers in canonical SGX/GXM order:
-    // POSITION -> COLOR0 -> COLOR1 -> FOG -> TEXCOORD0..9 -> PSIZE
+    // POSITION(+4) -> COLOR0(+4) -> COLOR1(+4) -> FOG(+2) -> TEXCOORD0..9(+2/+3/+4) -> PSIZE(+1) -> CLIP0..7(+1)
     void finalize_canonical_vertex_outputs();
 
     // Register an alias without allocating a duplicate input/output
@@ -73,6 +73,7 @@ public:
     [[nodiscard]] uint8_t get_temporary_count() const { return peak_temporary_; }
     [[nodiscard]] uint16_t get_constant_count() const { return next_constant_; }
     [[nodiscard]] uint8_t get_sampler_count() const { return next_sampler_; }
+    [[nodiscard]] bool has_temp_overflow() const { return temp_overflow_; }
     [[nodiscard]] uint16_t get_sampler_sa_base() const { return static_cast<uint16_t>((next_constant_ + 3u) & ~3u); }
     [[nodiscard]] uint16_t get_sampler_sa_offset(uint16_t sampler_unit) const {
         return static_cast<uint16_t>(get_sampler_sa_base() + sampler_unit * 4u);
@@ -88,6 +89,7 @@ private:
     uint8_t next_output_ = 0;
     uint8_t next_sampler_ = 0;
     uint32_t used_frag_texcoords_ = 0;
+    bool temp_overflow_ = false;
 
     std::vector<uint8_t> free_vec4_slots_;
     std::unordered_map<std::string, SymbolBinding> symbol_table_;

@@ -113,6 +113,27 @@ void test_clean_room_bitfield_encoders() {
     TEST_ASSERT(((br.raw_word >> 56) & 0x7ULL) == static_cast<uint64_t>(ExtPredicate::P0), "BR predicate must encode P0");
     TEST_ASSERT((br.raw_word & 0xFFFFFULL) == (static_cast<uint32_t>(-3) & 0xFFFFFU), "BR offset must encode -3 in 20-bit two's complement");
 
+    // V32NMAD ExtVecPredicate::NegP0 must encode 4 (not 5 from ExtPredicate)
+    MicrocodeWord vadd_negp0 = MicrocodeWord::encode_v32nmad(
+        UsseOpcode::VADD, r0, r2, r4, 0xF, kSwiz12XYZW, Vec4Swiz::XYZW, ExtPredicate::NegP0
+    );
+    TEST_ASSERT((vadd_negp0.raw_word >> 59) == 0b00001ULL, "VADD op1 must be 00001");
+    TEST_ASSERT(((vadd_negp0.raw_word >> 56) & 0x7ULL) == 4ULL, "V32NMAD NegP0 predicate must encode 4");
+
+    // KILL with ShortPredicate::P0 (1) and NegP0 (3)
+    MicrocodeWord kill_p0 = MicrocodeWord::encode_kill(ShortPredicate::P0);
+    TEST_ASSERT((kill_p0.raw_word >> 56) == 0b11111001ULL, "KILL op1/op2 mismatch");
+    TEST_ASSERT(((kill_p0.raw_word >> 41) & 0x3ULL) == 1ULL, "KILL ShortPredicate::P0 must encode 1");
+    MicrocodeWord kill_negp0 = MicrocodeWord::encode_kill(ShortPredicate::NegP0);
+    TEST_ASSERT(((kill_negp0.raw_word >> 41) & 0x3ULL) == 3ULL, "KILL ShortPredicate::NegP0 must encode 3");
+
+    // SMBO src1 offset encoding
+    MicrocodeWord smbo = MicrocodeWord::encode_smbo(0, 0, 64, 0);
+    TEST_ASSERT((smbo.raw_word >> 59) == 0b11111ULL, "SMBO op1 must be 11111");
+    TEST_ASSERT(((smbo.raw_word >> 56) & 0x7ULL) == 0b011ULL, "SMBO op2 must be 011");
+    TEST_ASSERT(((smbo.raw_word >> 52) & 0x3ULL) == 0b01ULL, "SMBO opcat must be 01");
+    TEST_ASSERT(((smbo.raw_word >> 12) & 0xFFFULL) == 64ULL, "SMBO src1 offset must encode 64 at bits 23..12");
+
     g_tests_passed++;
     std::cout << "  [PASS] test_clean_room_bitfield_encoders\n";
 }
@@ -328,7 +349,7 @@ void test_blinn_phong_normalmap_fragment() {
 
     const uint8_t* bytes = output->programData;
     TEST_ASSERT(read_u32(bytes, 0x80) == 2u, "Should emit 2 dependent sampler records");
-    const uint32_t varyings_count = read_u32(bytes, 0x9C + 0x0C);
+    const uint16_t varyings_count = read_u16(bytes, 0x9C + 0x0C);
     TEST_ASSERT(varyings_count == 4u, "Fragment shader should expose 4 varying descriptors");
 
     const uint32_t instr_count = read_u32(bytes, 0x3C);
@@ -564,6 +585,291 @@ void test_syntax_error_handling() {
     std::cout << "  [PASS] test_syntax_error_handling\n";
 }
 
+void test_gxp_vertex_varyings_and_frag_formats() {
+    // 1. Vertex shader with CLIP0/1, PSIZE, FOG, _HALF texcoord, odd-aligned outputs
+    const char* vp_code = R"(
+        uniform float4x4 u_MVP;
+        struct VS_OUT {
+            float  psize : PSIZE;
+            float3 uv1   : TEXCOORD1;
+            float2 uv0   : TEXCOORD0_HALF;
+            float  fog   : FOG;
+            float4 color : COLOR0;
+            float4 pos   : POSITION;
+            float  clip0 : CLIP0;
+            float  clip1 : CLIP1;
+        };
+        VS_OUT main(float4 p : POSITION, float2 t0 : TEXCOORD0, float3 t1 : TEXCOORD1) {
+            VS_OUT o;
+            o.pos = mul(u_MVP, p);
+            o.color = float4(1.0f, 0.5f, 0.25f, 1.0f);
+            o.fog = 0.75f;
+            o.uv0 = t0;
+            o.uv1 = t1;
+            o.psize = 4.0f;
+            o.clip0 = p.x;
+            o.clip1 = p.y;
+            return o;
+        }
+    )";
+
+    SceShaccCgCompileOptions vp_opts;
+    sceShaccCgInitializeCompileOptions(&vp_opts);
+    vp_opts.mainSourceFile = vp_code;
+    vp_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+
+    const SceShaccCgCompileOutput* vp_out = sceShaccCgCompileProgram(&vp_opts, nullptr, 0);
+    TEST_ASSERT(vp_out != nullptr && vp_out->programData != nullptr, "Extended VP outputs shader must compile");
+
+    const uint8_t* vp_bytes = vp_out->programData;
+    const uint32_t v_out1 = read_u32(vp_bytes, 0x9C + 0x10);
+    const uint32_t v_out2 = read_u32(vp_bytes, 0x9C + 0x14);
+    const uint32_t tc_pack = read_u32(vp_bytes, 0x9C + 0x18);
+    TEST_ASSERT((v_out1 & (1u << 0)) != 0u, "CLIP0 bit must be set");
+    TEST_ASSERT((v_out1 & (1u << 1)) != 0u, "CLIP1 bit must be set");
+    TEST_ASSERT((v_out1 & (1u << 8)) != 0u, "PSIZE bit must be set");
+    TEST_ASSERT((v_out1 & (1u << 9)) != 0u, "FOG bit must be set");
+    TEST_ASSERT((v_out1 & (1u << 11)) != 0u, "COLOR0 bit must be set");
+    TEST_ASSERT((v_out2 & 0x7u) == 1u, "TEXCOORD0 float2 must encode 1 in vertex_outputs2");
+    TEST_ASSERT(((v_out2 >> 3) & 0x7u) == 3u, "TEXCOORD1 float3 must encode 3 in vertex_outputs2");
+    TEST_ASSERT((tc_pack & 0x1u) != 0u, "TEXCOORD0_HALF must set bit 0 in texcoord_pack_format");
+    sceShaccCgDestroyCompileOutput(vp_out);
+
+    // 2. Fragment shader with SPRITECOORD and TEXCOORD0_HALF
+    const char* fp_code = R"(
+        uniform sampler2D u_SpriteTex;
+        float4 main(float2 tc : TEXCOORD0_HALF, float2 sp : SPRITECOORD) : COLOR {
+            return tex2D(u_SpriteTex, sp * 0.5f + tc * 0.5f);
+        }
+    )";
+
+    SceShaccCgCompileOptions fp_opts;
+    sceShaccCgInitializeCompileOptions(&fp_opts);
+    fp_opts.mainSourceFile = fp_code;
+    fp_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+
+    const SceShaccCgCompileOutput* fp_out = sceShaccCgCompileProgram(&fp_opts, nullptr, 0);
+    TEST_ASSERT(fp_out != nullptr && fp_out->programData != nullptr, "SPRITECOORD + _HALF FP shader must compile");
+
+    const uint8_t* fp_bytes = fp_out->programData;
+    const uint32_t fp_flags = read_u32(fp_bytes, 0x14);
+    TEST_ASSERT((fp_flags & (1u << 5)) != 0u, "GXP_PROGRAM_FLAG_SPRITECOORD (1<<5) must be set");
+    TEST_ASSERT(read_u16(fp_bytes, 0x9C + 0x0C) == 2u, "Fragment varyings_count must be 2");
+    TEST_ASSERT((read_u32(fp_bytes, 0x9C + 0x18) & 1u) != 0u, "Fragment texcoord_pack_format bit 0 must be set for _HALF");
+
+    const uint32_t attr0_info = read_u32(fp_bytes, 0xBC + 0x00);
+    const uint32_t attr1_info = read_u32(fp_bytes, 0xBC + 0x10);
+    TEST_ASSERT((attr0_info & 0x20000000u) != 0u, "TEXCOORD0_HALF descriptor must set F16 bit 29");
+    TEST_ASSERT((attr1_info & 0x40000000u) != 0u, "SPRITECOORD descriptor must set spritecoord bit 30");
+    sceShaccCgDestroyCompileOutput(fp_out);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_gxp_vertex_varyings_and_frag_formats\n";
+}
+
+void test_high_sa_smbo_and_dynamic_array_write() {
+    const char* shader_code = R"(
+        uniform float4 u_Bones[36];
+        uniform float4 u_Tint;
+
+        struct VS_OUT {
+            float4 pos : POSITION;
+            float4 col : COLOR0;
+        };
+
+        VS_OUT main(float4 pos : POSITION, float idx : TEXCOORD0) {
+            VS_OUT o;
+            float4 vClip[4];
+            vClip[0] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            vClip[1] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            vClip[2] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            vClip[3] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            int k = int(idx);
+            vClip[k] = u_Tint;
+            vClip[k].xy += float2(0.1f, 0.2f);
+            o.pos = pos + u_Bones[35];
+            o.col = vClip[1] * u_Tint;
+            return o;
+        }
+    )";
+
+    SceShaccCgCompileOptions opts;
+    sceShaccCgInitializeCompileOptions(&opts);
+    opts.mainSourceFile = shader_code;
+    opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+
+    const SceShaccCgCompileOutput* output = sceShaccCgCompileProgram(&opts, nullptr, 0);
+    TEST_ASSERT(output != nullptr && output->programData != nullptr, "High SA (>128) + dynamic array write shader must compile");
+
+    const uint8_t* bytes = output->programData;
+    const uint32_t instr_count = read_u32(bytes, 0x3C);
+    const size_t ucode_abs = 0x40 + static_cast<size_t>(read_i32(bytes, 0x40));
+
+    bool saw_smbo_nonzero = false;
+    bool saw_smbo_reset = false;
+    bool saw_vmov = false;
+    for (uint32_t i = 0; i < instr_count; ++i) {
+        uint64_t w = read_u64(bytes, ucode_abs + i * sizeof(uint64_t));
+        uint64_t op1 = (w >> 59);
+        if (op1 == 0b11111ULL && ((w >> 56) & 0x7ULL) == 0b011ULL && ((w >> 52) & 0x3ULL) == 0b01ULL) {
+            uint64_t s1_off = (w >> 12) & 0xFFFULL;
+            if (s1_off != 0ULL) saw_smbo_nonzero = true;
+            else saw_smbo_reset = true;
+        }
+        if (op1 == 0b00111ULL) {
+            saw_vmov = true;
+        }
+    }
+    TEST_ASSERT(saw_smbo_nonzero, "High SA read (>=128) must emit nonzero SMBO window offset");
+    TEST_ASSERT(saw_smbo_reset, "High SA read must emit SMBO 0 reset after VMOV");
+    TEST_ASSERT(saw_vmov, "High SA read must emit VMOV transfer");
+
+    sceShaccCgDestroyCompileOutput(output);
+    g_tests_passed++;
+    std::cout << "  [PASS] test_high_sa_smbo_and_dynamic_array_write\n";
+}
+
+void test_vitagl_real_world_ffp_and_glsl_translator() {
+    // 1. vitaGL FFP-style multi-light vertex shader (preprocessor macros, loops, dynamic arrays, half texcoords)
+    const char* ffp_v = R"(
+        #define POSITION POSITION
+        #define NUM_LIGHTS 4
+        #define HAS_CLIP 1
+
+        uniform float4x4 modelview;
+        uniform float4x4 wvp;
+        uniform float4 light_pos[NUM_LIGHTS];
+        uniform float4 light_diff[NUM_LIGHTS];
+        uniform float4 clip_planes[2];
+        uniform float fog_density;
+
+        float calc_diffuse(float3 n, float3 ldir) {
+            return max(dot(n, normalize(ldir)), 0.0f);
+        }
+
+        void main(
+            float3 pos : POSITION,
+            float3 norm : NORMAL,
+            float2 uv : TEXCOORD0,
+            float4 out vPos : POSITION,
+            float4 out vCol : COLOR0,
+            float2 out vTex : TEXCOORD0_HALF,
+            float  out vFog : FOG,
+            float  out vPSize : PSIZE,
+            float  out vClip[2] : CLP0
+        ) {
+            float4 p4 = float4(pos, 1.0f);
+            float4 mv = mul(modelview, p4);
+            vPos = mul(wvp, p4);
+            vTex = uv;
+            vPSize = 1.0f;
+            vFog = clamp(exp(-fog_density * abs(mv.z)), 0.0f, 1.0f);
+
+            float3 acc = float3(0.1f, 0.1f, 0.1f);
+            for (int i = 0; i < NUM_LIGHTS; ++i) {
+                float d = calc_diffuse(norm, light_pos[i].xyz - mv.xyz);
+                acc += light_diff[i].rgb * d;
+            }
+            vCol = float4(saturate(acc), 1.0f);
+
+            for (int c = 0; c < 2; ++c) {
+                vClip[c] = dot(mv, clip_planes[c]);
+            }
+        }
+    )";
+
+    SceShaccCgCompileOptions vp_opts;
+    sceShaccCgInitializeCompileOptions(&vp_opts);
+    vp_opts.mainSourceFile = ffp_v;
+    vp_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+    const SceShaccCgCompileOutput* vp_res = sceShaccCgCompileProgram(&vp_opts, nullptr, 0);
+    TEST_ASSERT(vp_res != nullptr && vp_res->programData != nullptr, "vitaGL FFP multi-light vertex shader must compile");
+    TEST_ASSERT(read_u32(vp_res->programData, 0x34) < 120u, "FFP vertex shader must stay under 120 temps");
+    TEST_ASSERT((read_u32(vp_res->programData, 0x9C + 0x10) & 0x3u) == 0x3u, "CLP0 array[2] must set CLIP0 and CLIP1 flags");
+    sceShaccCgDestroyCompileOutput(vp_res);
+
+    // 2. vitaGL FFP-style multi-texture fragment shader with alpha test discard
+    const char* ffp_f = R"(
+        #define NUM_TEX 2
+        uniform sampler2D tex[NUM_TEX];
+        uniform float4 texenv_col[NUM_TEX];
+        uniform float4 fog_color;
+        uniform float alpha_ref;
+
+        float4 blend_stage(float4 prev, float4 sample_c, float4 env_c) {
+            return lerp(prev, sample_c * env_c, env_c.a);
+        }
+
+        float4 main(
+            float4 vCol : COLOR0,
+            float2 vTex : TEXCOORD0_HALF,
+            float2 vPoint : SPRITECOORD,
+            float  vFog : FOG
+        ) : COLOR {
+            float4 res = vCol;
+            for (int t = 0; t < NUM_TEX; ++t) {
+                float2 tc = (t == 0) ? vTex : vPoint;
+                float4 smp = (t == 0) ? tex2D(tex[0], tc) : tex2D(tex[1], tc);
+                res = blend_stage(res, smp, texenv_col[t]);
+            }
+            if (res.a < alpha_ref) {
+                discard;
+            }
+            return float4(lerp(fog_color.rgb, res.rgb, vFog), res.a);
+        }
+    )";
+
+    SceShaccCgCompileOptions fp_opts;
+    sceShaccCgInitializeCompileOptions(&fp_opts);
+    fp_opts.mainSourceFile = ffp_f;
+    fp_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* fp_res = sceShaccCgCompileProgram(&fp_opts, nullptr, 0);
+    TEST_ASSERT(fp_res != nullptr && fp_res->programData != nullptr, "vitaGL FFP fragment shader must compile");
+    TEST_ASSERT(read_u32(fp_res->programData, 0x34) < 120u, "FFP fragment shader must stay under 120 temps");
+    TEST_ASSERT((read_u32(fp_res->programData, 0x14) & (1u << 3)) != 0u, "DISCARD_USED flag must be set");
+    TEST_ASSERT((read_u32(fp_res->programData, 0x14) & (1u << 5)) != 0u, "SPRITECOORD flag must be set");
+    sceShaccCgDestroyCompileOutput(fp_res);
+
+    // 3. vitaGL glsl_translator-style shader with varying out/in, overloads, sampler helper, trig & bitops
+    const char* glsl_trans = R"(
+        #define VOUT varying out
+        #define VIN varying in
+        VOUT float4 gl_Position : POSITION;
+        VIN float2 v_uv : TEXCOORD0;
+        uniform sampler2D u_Tex;
+        uniform float4x4 u_Mat;
+
+        float4 vglMul(float4 a, float4 b) { return a * b; }
+        float4 vglMul(float4x4 m, float4 v) { return mul(m, v); }
+        int4 vglMul(int4 a, int4 b) { return a * b; }
+
+        float4 glslTexture2D(sampler2D x, float2 s) {
+            return tex2D(x, s);
+        }
+
+        void main(float4 a_pos : POSITION, out float4 v_col : COLOR0) {
+            int mask = (1 << 2) | 3;
+            float angle = atan(v_uv.y, v_uv.x) + asin(0.5f) * (float(mask) * 0.1f);
+            float4 pos = vglMul(u_Mat, a_pos);
+            float4 tex_c = glslTexture2D(u_Tex, v_uv);
+            v_col = vglMul(vglUnpack(tex_c), float4(cos(angle), fmod(angle, 1.0f), 1.0f, 1.0f));
+            gl_Position = pos;
+        }
+    )";
+
+    SceShaccCgCompileOptions glsl_opts;
+    sceShaccCgInitializeCompileOptions(&glsl_opts);
+    glsl_opts.mainSourceFile = glsl_trans;
+    glsl_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+    const SceShaccCgCompileOutput* glsl_res = sceShaccCgCompileProgram(&glsl_opts, nullptr, 0);
+    TEST_ASSERT(glsl_res != nullptr && glsl_res->programData != nullptr, "vitaGL glsl_translator-style shader must compile");
+    TEST_ASSERT(read_u32(glsl_res->programData, 0x34) < 120u, "glsl_translator shader must stay under 120 temps");
+    sceShaccCgDestroyCompileOutput(glsl_res);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_vitagl_real_world_ffp_and_glsl_translator\n";
+}
+
 int main() {
     std::cout << "Running open-shacc Clean-Room Test Suite...\n";
     test_version();
@@ -576,6 +882,9 @@ int main() {
     test_alpha_clip_discard_and_depth();
     test_canonical_vertex_output_order();
     test_dot_product_lighting();
+    test_gxp_vertex_varyings_and_frag_formats();
+    test_high_sa_smbo_and_dynamic_array_write();
+    test_vitagl_real_world_ffp_and_glsl_translator();
     test_syntax_error_handling();
 
     std::cout << "\nTest Results: " << g_tests_passed << " passed, " << g_tests_failed << " failed.\n";

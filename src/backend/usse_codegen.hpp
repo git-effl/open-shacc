@@ -110,7 +110,8 @@ private:
     ValueRef make_const_vec(const std::array<float, 4>& vals, uint8_t count);
 
     // Hardware operand legalization & moves
-    HardwareRegister to_hw_src1(const ValueRef& val, uint16_t& out_swiz12) const;
+    ValueRef legalize_source_value(const ValueRef& val);
+    HardwareRegister to_hw_src1(const ValueRef& val, uint16_t& out_swiz12);
     HardwareRegister to_hw_src2(const ValueRef& val, Vec4Swiz& out_swiz4);
     ValueRef materialize_to_temp(const ValueRef& val, uint8_t target_count = 0, const std::string& comment = "");
     void emit_move(
@@ -139,6 +140,10 @@ private:
 
     // Math & intrinsic expansions
     ValueRef emit_sin_cos(const ValueRef& x, bool is_cos);
+    ValueRef emit_atan(const ValueRef& x);
+    ValueRef emit_atan2(const ValueRef& y, const ValueRef& x);
+    ValueRef emit_asin(const ValueRef& x);
+    ValueRef emit_acos(const ValueRef& x);
     ValueRef emit_floor(const ValueRef& x);
     ValueRef emit_ceil(const ValueRef& x);
     ValueRef emit_trunc(const ValueRef& x);
@@ -176,8 +181,17 @@ private:
     ValueRef generate_variable(const frontend::VariableExpr* var);
     ValueRef generate_literal(const frontend::LiteralExpr* lit);
 
-    // Helper function inlining
-    ValueRef invoke_user_function(const frontend::FunctionDecl* fn, const frontend::CallExpr* call);
+    // Helper function inlining & overload resolution
+    const frontend::FunctionDecl* resolve_user_function(
+        const std::string& name,
+        const frontend::CallExpr* call,
+        const std::vector<ValueRef>& eval_args
+    ) const;
+    ValueRef invoke_user_function(
+        const frontend::FunctionDecl* fn,
+        const frontend::CallExpr* call,
+        std::vector<ValueRef> evaluated_args
+    );
 
     // Statements
     void generate_statement(const frontend::Statement* stmt);

@@ -14,12 +14,30 @@ namespace open_shacc::backend {
 
 namespace {
 
-int vertex_output_sort_key(const std::string& sem_raw) {
-    std::string up;
-    up.reserve(sem_raw.size());
-    for (char c : sem_raw) {
-        up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+std::string upper_copy(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
+    return out;
+}
+
+std::string strip_sem_qualifiers(const std::string& s, bool* out_is_half = nullptr, bool* out_is_centroid = nullptr) {
+    std::string up = upper_copy(s);
+    auto strip = [&](const char* suf, size_t len, bool* flag) {
+        if (up.size() > len && up.compare(up.size() - len, len, suf) == 0) {
+            up.resize(up.size() - len);
+            if (flag) *flag = true;
+        }
+    };
+    strip("_CENTROID", 9, out_is_centroid);
+    strip("_HALF", 5, out_is_half);
+    strip("_CENTROID", 9, out_is_centroid);
+    return up;
+}
+
+int vertex_output_sort_key(const std::string& sem_raw) {
+    std::string up = strip_sem_qualifiers(sem_raw);
     if (up.find("POSITION") == 0 || up == "HPOS" || up == "WPOS") return 0;
     if (up == "COLOR" || up == "COLOR0" || up == "COL0" || up == "DIFFUSE") return 1;
     if (up == "COLOR1" || up == "COL1" || up == "SPECULAR") return 2;
@@ -29,15 +47,19 @@ int vertex_output_sort_key(const std::string& sem_raw) {
         return 4 + std::clamp(idx, 0, 9);
     }
     if (up == "PSIZE" || up == "POINTSIZE") return 14;
-    return 100;
-}
-
-std::string upper_copy(const std::string& s) {
-    std::string out = s;
-    for (char& c : out) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (up.find("CLP") == 0) {
+        int idx = std::atoi(up.c_str() + 3);
+        return 15 + std::clamp(idx, 0, 7);
     }
-    return out;
+    if (up.find("CLIPDISTANCE") == 0) {
+        int idx = std::atoi(up.c_str() + 12);
+        return 15 + std::clamp(idx, 0, 7);
+    }
+    if (up.find("CLIP") == 0) {
+        int idx = std::atoi(up.c_str() + 4);
+        return 15 + std::clamp(idx, 0, 7);
+    }
+    return 100;
 }
 
 } // namespace
@@ -54,6 +76,7 @@ void RegisterAllocator::reset() {
     next_output_ = 0;
     next_sampler_ = 0;
     used_frag_texcoords_ = 0;
+    temp_overflow_ = false;
     free_vec4_slots_.clear();
     symbol_table_.clear();
     uniforms_.clear();
@@ -150,24 +173,29 @@ bool RegisterAllocator::allocate_sampler(
 }
 
 std::string RegisterAllocator::assign_fragment_hw_semantic(const std::string& requested_sem) {
-    std::string up = upper_copy(requested_sem);
+    bool is_half = false;
+    bool is_centroid = false;
+    std::string up = strip_sem_qualifiers(requested_sem, &is_half, &is_centroid);
+    std::string suffix = is_half ? "_HALF" : "";
+
     if (up.find("TEXCOORD") == 0) {
         int idx = std::clamp(std::atoi(up.c_str() + 8), 0, 9);
         used_frag_texcoords_ |= (1u << static_cast<uint32_t>(idx));
-        return "TEXCOORD" + std::to_string(idx);
+        return "TEXCOORD" + std::to_string(idx) + suffix;
     }
     if (up == "COLOR" || up == "COLOR0" || up == "COL0" || up == "COLOR1" || up == "COL1" ||
-        up.find("FOG") == 0 || up == "WPOS" || up == "VPOS" || up == "POSITION" || up == "SPRITECOORD") {
-        return up;
+        up.find("FOG") == 0 || up == "WPOS" || up == "VPOS" || up == "POSITION" ||
+        up == "SPRITECOORD" || up == "POINTCOORD") {
+        return up + suffix;
     }
     // Map unrecognized varying semantics (e.g. NORMAL, TANGENT, empty) to the next unused TEXCOORD slot
     for (int idx = 0; idx < 10; ++idx) {
         if ((used_frag_texcoords_ & (1u << static_cast<uint32_t>(idx))) == 0) {
             used_frag_texcoords_ |= (1u << static_cast<uint32_t>(idx));
-            return "TEXCOORD" + std::to_string(idx);
+            return "TEXCOORD" + std::to_string(idx) + suffix;
         }
     }
-    return "TEXCOORD9";
+    return "TEXCOORD9" + suffix;
 }
 
 bool RegisterAllocator::allocate_input(
@@ -251,11 +279,26 @@ void RegisterAllocator::finalize_canonical_vertex_outputs() {
 
     uint16_t cur_out = 0;
     for (auto& out : outputs_) {
-        std::string up = upper_copy(out.semantic);
-        uint16_t hw_words = (up == "PSIZE" || up == "POINTSIZE") ? 2u : 4u; // Keep even-aligned for USSE
+        std::string up = strip_sem_qualifiers(out.semantic);
+        uint16_t stride = 4u;
+        if (up == "POSITION" || up == "HPOS" || up == "COLOR" || up == "COLOR0" || up == "COL0" ||
+            up == "COLOR1" || up == "COL1" || up == "DIFFUSE" || up == "SPECULAR") {
+            stride = 4u;
+        } else if (up.find("FOG") == 0) {
+            stride = 2u;
+        } else if (up.find("TEXCOORD") == 0) {
+            size_t comp = std::clamp<size_t>(out.type.component_count(), 2, 4);
+            stride = static_cast<uint16_t>(comp);
+        } else if (up == "PSIZE" || up == "POINTSIZE") {
+            stride = 1u;
+        } else if (up.find("CLP") == 0 || up.find("CLIP") == 0) {
+            uint16_t arr = static_cast<uint16_t>(out.type.array_size > 1 ? out.type.array_size : 1u);
+            stride = arr;
+        }
+
         out.base_register = cur_out;
-        out.allocated_words = hw_words;
-        cur_out = static_cast<uint16_t>(cur_out + ((up == "PSIZE" || up == "POINTSIZE") ? 1u : 4u));
+        out.allocated_words = stride;
+        cur_out = static_cast<uint16_t>(cur_out + stride);
         // Update matching symbol table entries and aliases
         for (auto& [k, sym] : symbol_table_) {
             if (sym.reg_class == RegisterClass::Output &&
@@ -286,7 +329,7 @@ uint8_t RegisterAllocator::allocate_temp_vec4() {
     }
     // Keep strictly below 120 (SGX FPINTERNAL threshold for doubled F32 addressing)
     if (next_temporary_ + 4u > 120u) {
-        // Fallback: reuse last safe slot rather than clobbering FPINTERNAL
+        temp_overflow_ = true;
         return 112;
     }
     uint8_t base = next_temporary_;
@@ -303,6 +346,7 @@ uint8_t RegisterAllocator::allocate_contiguous_temp_vec4s(uint8_t vec4_count) {
     }
     uint16_t words = static_cast<uint16_t>(vec4_count) * 4u;
     if (static_cast<uint16_t>(next_temporary_) + words > 120u) {
+        temp_overflow_ = true;
         return 0;
     }
     uint8_t base = next_temporary_;
@@ -314,10 +358,26 @@ uint8_t RegisterAllocator::allocate_contiguous_temp_vec4s(uint8_t vec4_count) {
 }
 
 void RegisterAllocator::free_temp_vec4(uint8_t base_reg) {
-    if (base_reg < peak_temporary_ && (base_reg % 4u == 0)) {
-        if (std::find(free_vec4_slots_.begin(), free_vec4_slots_.end(), base_reg) == free_vec4_slots_.end()) {
-            free_vec4_slots_.push_back(base_reg);
+    if (base_reg >= peak_temporary_ || (base_reg % 4u != 0)) {
+        return;
+    }
+    if (base_reg + 4u == next_temporary_) {
+        next_temporary_ = static_cast<uint8_t>(next_temporary_ - 4u);
+        bool shrunk = true;
+        while (shrunk && next_temporary_ >= 4u) {
+            shrunk = false;
+            uint8_t prev_top = static_cast<uint8_t>(next_temporary_ - 4u);
+            auto it = std::find(free_vec4_slots_.begin(), free_vec4_slots_.end(), prev_top);
+            if (it != free_vec4_slots_.end()) {
+                free_vec4_slots_.erase(it);
+                next_temporary_ = prev_top;
+                shrunk = true;
+            }
         }
+        return;
+    }
+    if (std::find(free_vec4_slots_.begin(), free_vec4_slots_.end(), base_reg) == free_vec4_slots_.end()) {
+        free_vec4_slots_.push_back(base_reg);
     }
 }
 
