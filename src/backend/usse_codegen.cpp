@@ -777,6 +777,7 @@ void UsseCodeGenerator::emit_move_mapped(
         return;
     }
 
+    push_scope();
     uint16_t raw_swiz12 = 0;
     HardwareRegister src1_hw = to_hw_src1(src, raw_swiz12);
     HardwareRegister zero_hw = get_zero_hw_reg();
@@ -805,6 +806,7 @@ void UsseCodeGenerator::emit_move_mapped(
 
     emit_reg_chunk(dst_even, mask0, logical_for_p0);
     emit_reg_chunk(static_cast<uint16_t>(dst_even + 4u), mask1, logical_for_p1);
+    pop_scope();
 }
 
 ValueRef UsseCodeGenerator::emit_binary_alu(
@@ -946,6 +948,7 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
     if (op == frontend::BinaryOp::Sub) {
         // V32NMAD VSUB(src1, src2) computes (-src1) + src2 = src2 - src1.
         // Put rhs (subtrahend) in hw_src1 and lhs (minuend) in hw_src2.
+        push_scope();
         if (lhs.is_const) {
             lhs = materialize_to_temp(lhs, n, "sub lhs");
         }
@@ -965,6 +968,7 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
         inst.src2_swiz4 = src2_sw4;
         inst.comment = comment;
         emit_inst(std::move(inst));
+        pop_scope();
         return dst;
     }
 
@@ -983,6 +987,7 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
     ValueRef& s1_ref = swap ? rhs : lhs;
     ValueRef& s2_ref = swap ? lhs : rhs;
 
+    push_scope();
     if (s2_ref.is_const) {
         s2_ref = materialize_to_temp(s2_ref, n, "const src2");
     }
@@ -1003,6 +1008,7 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
     inst.src2_swiz4 = src2_sw4;
     inst.comment = comment;
     emit_inst(std::move(inst));
+    pop_scope();
     return dst;
 }
 
@@ -1026,6 +1032,8 @@ ValueRef UsseCodeGenerator::emit_vcomp_vec(UsseOpcode op, const ValueRef& src_in
         return make_const_vec(res, n);
     }
 
+    ValueRef dst = make_temp_vec4(n);
+    push_scope();
     // VCOMP only reads register lanes 0..3 (no inline constant swizzles Zero/One/Two/Half)
     ValueRef src = legalize_source_value(src_in);
     bool has_inline = false;
@@ -1039,7 +1047,6 @@ ValueRef UsseCodeGenerator::emit_vcomp_vec(UsseOpcode op, const ValueRef& src_in
         src = materialize_to_temp(src, n, "vcomp src");
     }
 
-    ValueRef dst = make_temp_vec4(n);
     uint16_t even_base = src.base_index & ~1u;
     uint8_t bias = static_cast<uint8_t>(src.base_index & 1u);
 
@@ -1067,6 +1074,7 @@ ValueRef UsseCodeGenerator::emit_vcomp_vec(UsseOpcode op, const ValueRef& src_in
         inst.comment = comment;
         emit_inst(std::move(inst));
     }
+    pop_scope();
     return dst;
 }
 
@@ -1089,6 +1097,8 @@ ValueRef UsseCodeGenerator::emit_dp(const ValueRef& a_in, const ValueRef& b_in, 
         return make_const_scalar(acc);
     }
 
+    ValueRef dst = make_temp_vec4(1);
+    push_scope();
     // Hardware V32NMAD VDP computes 4 products (x, y, z, w).
     // For n < 4, zero unused lanes in BOTH src1 (via SwizzleChannel::Zero) and src2 (via materialized clean temp).
     ValueRef a = a_in;
@@ -1117,7 +1127,6 @@ ValueRef UsseCodeGenerator::emit_dp(const ValueRef& a_in, const ValueRef& b_in, 
     uint16_t src1_sw12 = kSwiz12XYZW;
     HardwareRegister hw_src1 = to_hw_src1(a, src1_sw12);
 
-    ValueRef dst = make_temp_vec4(1);
     UsseInstruction inst;
     inst.opcode = (n <= 3) ? UsseOpcode::VDP3 : UsseOpcode::VDP4;
     inst.dst.reg_class = RegisterClass::Temporary;
@@ -1129,6 +1138,7 @@ ValueRef UsseCodeGenerator::emit_dp(const ValueRef& a_in, const ValueRef& b_in, 
     inst.src2_swiz4 = src2_sw4;
     inst.comment = comment;
     emit_inst(std::move(inst));
+    pop_scope();
 
     dst.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
     return dst;
@@ -1167,6 +1177,7 @@ void UsseCodeGenerator::emit_vtst_p0(
         return r;
     };
 
+    push_scope();
     HardwareRegister l_hw = prep_scalar_x(lhs_in);
     HardwareRegister r_hw = prep_scalar_x(rhs_in);
 
@@ -1180,6 +1191,7 @@ void UsseCodeGenerator::emit_vtst_p0(
     inst.vtst_chan = 0;
     inst.comment = comment;
     emit_inst(std::move(inst));
+    pop_scope();
 }
 
 ValueRef UsseCodeGenerator::emit_compare_to_float(frontend::BinaryOp op, const ValueRef& lhs, const ValueRef& rhs) {
@@ -1394,12 +1406,19 @@ ValueRef UsseCodeGenerator::emit_pow(const ValueRef& x, const ValueRef& y) {
     }
     uint8_t n = std::max(x.count, y.count);
     ValueRef out = make_temp_vec4(n);
-    push_scope();
-    ValueRef lx = emit_vcomp_vec(UsseOpcode::VLOG, x, "pow log2");
-    ValueRef prod = emit_binary_alu(frontend::BinaryOp::Mul, lx, y, "pow y*log2(x)");
-    ValueRef res = emit_vcomp_vec(UsseOpcode::VEXP, prod, "pow exp2");
-    emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), res, "pow");
-    pop_scope();
+    {
+        push_scope();
+        ValueRef lx = emit_vcomp_vec(UsseOpcode::VLOG, x, "pow log2");
+        ValueRef prod = emit_binary_alu(frontend::BinaryOp::Mul, lx, y, "pow y*log2(x)");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), prod, "pow prod");
+        pop_scope();
+    }
+    {
+        push_scope();
+        ValueRef res = emit_vcomp_vec(UsseOpcode::VEXP, out, "pow exp2");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), res, "pow");
+        pop_scope();
+    }
     return out;
 }
 
@@ -3001,12 +3020,14 @@ ValueRef UsseCodeGenerator::generate_array_access(const frontend::ArrayAccessExp
     }
 
     ValueRef out = make_temp_vec4(base.count);
+    push_scope();
     ValueRef elem0 = base;
     elem0.is_array = false;
     elem0.is_matrix = false;
     emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(base.count), elem0, "arr[0]");
 
     for (uint32_t k = 1; k < limit; ++k) {
+        push_scope();
         emit_vtst_p0(idx_val, make_const_scalar(static_cast<float>(k)),
                      VtstSignTest::NeOrEq, VtstZeroTest::IncludeZero, "arr idx == " + std::to_string(k));
         size_t br_skip = emit_br(0, ExtPredicate::NegP0, "skip arr elem");
@@ -3016,7 +3037,9 @@ ValueRef UsseCodeGenerator::generate_array_access(const frontend::ArrayAccessExp
         ek.is_matrix = false;
         emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(base.count), ek, "arr[" + std::to_string(k) + "]");
         patch_br(br_skip, instructions_.size());
+        pop_scope();
     }
+    pop_scope();
     return out;
 }
 
