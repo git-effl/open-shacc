@@ -902,22 +902,43 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
     ValueRef lhs = expand_swiz(lhs_in, n);
     ValueRef rhs = expand_swiz(rhs_in, n);
 
-    // Ensure non-inline constants are materialized when needed (only src1 can use inline consts 0/1/2/0.5)
-    auto has_only_inline_consts = [](const ValueRef& v) {
-        if (!v.is_const) return false;
+    // Non-inline splat constants can be read directly from the packed LIMM cache without allocating a temp vec4
+    auto resolve_alu_const = [&](ValueRef& v) {
+        if (!v.is_const) return;
+        bool all_inline = true;
         SwizzleChannel dummy{};
         for (uint8_t i = 0; i < v.count; ++i) {
-            if (!is_inline_const_val(v.const_vals[i], dummy)) return false;
+            float cv = v.const_vals[i];
+            if (v.is_absolute) cv = std::fabs(cv);
+            if (v.is_negated) cv = -cv;
+            if (!is_inline_const_val(cv, dummy)) {
+                all_inline = false;
+                break;
+            }
         }
-        return true;
+        if (all_inline) return;
+
+        bool is_splat = true;
+        for (uint8_t i = 1; i < v.count; ++i) {
+            if (v.const_vals[i] != v.const_vals[0]) {
+                is_splat = false;
+                break;
+            }
+        }
+        if (is_splat) {
+            float cv = v.const_vals[0];
+            if (v.is_absolute) cv = std::fabs(cv);
+            if (v.is_negated) cv = -cv;
+            v = get_or_create_float_const(cv);
+            v.count = n;
+            v.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+            return;
+        }
+        v = materialize_to_temp(v, n, "const alu vec");
     };
 
-    if (lhs.is_const && !has_only_inline_consts(lhs)) {
-        lhs = materialize_to_temp(lhs, n, "const lhs");
-    }
-    if (rhs.is_const && !has_only_inline_consts(rhs)) {
-        rhs = materialize_to_temp(rhs, n, "const rhs");
-    }
+    resolve_alu_const(lhs);
+    resolve_alu_const(rhs);
 
     ValueRef dst = make_temp_vec4(n);
     uint8_t wmask = mask_for_count(n);
@@ -1122,6 +1143,14 @@ void UsseCodeGenerator::emit_vtst_p0(
 ) {
     // Materialize operands into clean lane-.x scalar temps if needed
     auto prep_scalar_x = [&](const ValueRef& v) -> HardwareRegister {
+        if (v.is_const) {
+            float cv = v.const_vals[0];
+            if (v.is_absolute) cv = std::fabs(cv);
+            if (v.is_negated) cv = -cv;
+            if (cv == 0.0f) {
+                return get_zero_hw_reg();
+            }
+        }
         if (!v.is_const && !v.is_negated && !v.is_absolute &&
             (v.base_index & 1u) == 0 && v.base_index < 128u && v.swiz[0] == SwizzleChannel::X &&
             (v.reg_class == RegisterClass::Temporary || v.reg_class == RegisterClass::InputAttr ||
@@ -1395,7 +1424,7 @@ ValueRef UsseCodeGenerator::emit_sin_cos(const ValueRef& x_in, bool is_cos) {
     uint8_t wmask = mask_for_count(n);
     ValueRef out = make_temp_vec4(n);
 
-    // Phase 1: Range-reduce x into [-pi, pi] inside out, then release all phase-1 temps
+    // Phase 1: Range-reduce x into [-pi, pi] inside out, using tight subscopes to cap peak temps at <= 3 vec4s
     {
         push_scope();
         ValueRef x = x_in;
@@ -1404,13 +1433,17 @@ ValueRef UsseCodeGenerator::emit_sin_cos(const ValueRef& x_in, bool is_cos) {
         }
         ValueRef scaled = emit_binary_alu(frontend::BinaryOp::Mul, x, make_const_scalar(kInvTwoPi), "sin/cos inv2pi");
         ValueRef shifted = emit_binary_alu(frontend::BinaryOp::Add, scaled, make_const_scalar(0.5f), "sin/cos +0.5");
-
+        emit_move(RegisterClass::Temporary, out.base_index, wmask, shifted, "sin/cos wrap");
+        pop_scope();
+    }
+    {
+        push_scope();
         ValueRef frc = make_temp_vec4(n);
         {
             uint16_t sw12 = kSwiz12XYZW;
-            HardwareRegister hw_s1 = to_hw_src1(shifted, sw12);
+            HardwareRegister hw_s1 = to_hw_src1(out, sw12);
             Vec4Swiz sw4 = Vec4Swiz::XYZW;
-            HardwareRegister hw_s2 = to_hw_src2(shifted, sw4);
+            HardwareRegister hw_s2 = to_hw_src2(out, sw4);
             UsseInstruction inst;
             inst.opcode = UsseOpcode::VFRC;
             inst.dst.reg_class = RegisterClass::Temporary;
@@ -1472,15 +1505,16 @@ ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
 
     auto atan_scalar = [&](const ValueRef& sx) -> ValueRef {
         ValueRef mag = make_temp_vec4(1);
-        push_scope();
+        ValueRef r = make_temp_vec4(1);
         ValueRef ax = sx;
         ax.is_negated = false;
         ax.is_absolute = true;
-        ValueRef inv_ax = emit_vcomp_vec(UsseOpcode::VRCP,
-                                         emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan eps"),
-                                         "atan 1/|x|");
-        ValueRef r = make_temp_vec4(1);
+
         {
+            push_scope();
+            ValueRef inv_ax = emit_vcomp_vec(UsseOpcode::VRCP,
+                                             emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan eps"),
+                                             "atan 1/|x|");
             ValueRef ax_t = materialize_to_temp(ax, 1, "atan |x|");
             ValueRef inv_t = materialize_to_temp(inv_ax, 1, "atan rcp");
             Vec4Swiz sw4 = Vec4Swiz::XXXX; HardwareRegister hw_s2 = to_hw_src2(inv_t, sw4);
@@ -1491,31 +1525,50 @@ ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
             imin.src0 = hw_s1; imin.src1 = hw_s2; imin.write_mask = 0x1;
             imin.src1_swiz12 = sw12; imin.src2_swiz4 = sw4;
             emit_inst(std::move(imin));
+            pop_scope();
         }
-        ValueRef r2 = emit_binary_alu(frontend::BinaryOp::Mul, r, r, "atan r^2");
-        ValueRef p = emit_binary_alu(frontend::BinaryOp::Sub,
-                                     make_const_scalar(0.288679f),
-                                     emit_binary_alu(frontend::BinaryOp::Mul, r2, make_const_scalar(0.079331f)),
-                                     "atan p1");
-        ValueRef q = emit_binary_alu(frontend::BinaryOp::Sub,
-                                     make_const_scalar(0.995354f),
-                                     emit_binary_alu(frontend::BinaryOp::Mul, r2, p),
-                                     "atan q");
-        ValueRef raw_mag = emit_binary_alu(frontend::BinaryOp::Mul, r, q, "atan_small");
-        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, raw_mag, "atan mag");
 
-        emit_vtst_p0(ax, make_const_scalar(1.0f), VtstSignTest::GtOrGe, VtstZeroTest::ExcludeZero, "|x|>1");
-        size_t br_fold = emit_br(0, ExtPredicate::NegP0, "skip pi/2-atan");
-        ValueRef folded = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), mag, "pi/2 - atan");
-        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, folded, "atan folded");
-        patch_br(br_fold, instructions_.size());
+        // Accumulate polynomial in mag, keeping r2 in a dedicated subscope so peak is <= 4 vec4s
+        {
+            push_scope();
+            ValueRef r2 = emit_binary_alu(frontend::BinaryOp::Mul, r, r, "atan r^2");
+            {
+                push_scope();
+                ValueRef p = emit_binary_alu(frontend::BinaryOp::Sub,
+                                             make_const_scalar(0.288679f),
+                                             emit_binary_alu(frontend::BinaryOp::Mul, r2, make_const_scalar(0.079331f)),
+                                             "atan p1");
+                emit_move(RegisterClass::Temporary, mag.base_index, 0x1, p, "atan p");
+                pop_scope();
+            }
+            {
+                push_scope();
+                ValueRef q = emit_binary_alu(frontend::BinaryOp::Sub,
+                                             make_const_scalar(0.995354f),
+                                             emit_binary_alu(frontend::BinaryOp::Mul, r2, mag),
+                                             "atan q");
+                ValueRef raw_mag = emit_binary_alu(frontend::BinaryOp::Mul, r, q, "atan_small");
+                emit_move(RegisterClass::Temporary, mag.base_index, 0x1, raw_mag, "atan mag");
+                pop_scope();
+            }
+            pop_scope();
+        }
 
-        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "x<0");
-        size_t br_sign = emit_br(0, ExtPredicate::NegP0, "skip atan neg");
-        ValueRef neg_mag = mag; neg_mag.is_negated = !neg_mag.is_negated;
-        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, neg_mag, "atan neg");
-        patch_br(br_sign, instructions_.size());
-        pop_scope();
+        {
+            push_scope();
+            emit_vtst_p0(ax, make_const_scalar(1.0f), VtstSignTest::GtOrGe, VtstZeroTest::ExcludeZero, "|x|>1");
+            size_t br_fold = emit_br(0, ExtPredicate::NegP0, "skip pi/2-atan");
+            ValueRef folded = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), mag, "pi/2 - atan");
+            emit_move(RegisterClass::Temporary, mag.base_index, 0x1, folded, "atan folded");
+            patch_br(br_fold, instructions_.size());
+
+            emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "x<0");
+            size_t br_sign = emit_br(0, ExtPredicate::NegP0, "skip atan neg");
+            ValueRef neg_mag = mag; neg_mag.is_negated = !neg_mag.is_negated;
+            emit_move(RegisterClass::Temporary, mag.base_index, 0x1, neg_mag, "atan neg");
+            patch_br(br_sign, instructions_.size());
+            pop_scope();
+        }
         mag.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return mag;
     };
@@ -1549,26 +1602,36 @@ ValueRef UsseCodeGenerator::emit_atan2(const ValueRef& y, const ValueRef& x) {
     constexpr float kPi = 3.14159265359f;
     auto atan2_scalar = [&](const ValueRef& sy, const ValueRef& sx) -> ValueRef {
         ValueRef a = make_temp_vec4(1);
-        push_scope();
-        ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
-        ValueRef denom = emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan2 denom");
-        ValueRef ratio = emit_binary_alu(frontend::BinaryOp::Div, sy, denom, "atan2 y/|x|");
-        ValueRef base_a = emit_atan(ratio);
-        emit_move(RegisterClass::Temporary, a.base_index, 0x1, base_a, "atan2 a");
-
-        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 x<0");
-        size_t br_pos_x = emit_br(0, ExtPredicate::NegP0, "x >= 0");
-        emit_vtst_p0(sy, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 y<0");
-        size_t br_neg_y = emit_br(0, ExtPredicate::P0, "x<0, y<0");
-        ValueRef q2 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), a, "pi - a");
-        emit_move(RegisterClass::Temporary, a.base_index, 0x1, q2);
-        size_t br_done = emit_br(0, ExtPredicate::None, "atan2 q2 done");
-        patch_br(br_neg_y, instructions_.size());
-        ValueRef q3 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(-kPi), a, "-pi - a");
-        emit_move(RegisterClass::Temporary, a.base_index, 0x1, q3);
-        patch_br(br_done, instructions_.size());
-        patch_br(br_pos_x, instructions_.size());
-        pop_scope();
+        {
+            push_scope();
+            ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
+            ValueRef denom = emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan2 denom");
+            ValueRef ratio = emit_binary_alu(frontend::BinaryOp::Div, sy, denom, "atan2 y/|x|");
+            emit_move(RegisterClass::Temporary, a.base_index, 0x1, ratio, "atan2 ratio");
+            pop_scope();
+        }
+        {
+            push_scope();
+            ValueRef base_a = emit_atan(a);
+            emit_move(RegisterClass::Temporary, a.base_index, 0x1, base_a, "atan2 a");
+            pop_scope();
+        }
+        {
+            push_scope();
+            emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 x<0");
+            size_t br_pos_x = emit_br(0, ExtPredicate::NegP0, "x >= 0");
+            emit_vtst_p0(sy, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 y<0");
+            size_t br_neg_y = emit_br(0, ExtPredicate::P0, "x<0, y<0");
+            ValueRef q2 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), a, "pi - a");
+            emit_move(RegisterClass::Temporary, a.base_index, 0x1, q2);
+            size_t br_done = emit_br(0, ExtPredicate::None, "atan2 q2 done");
+            patch_br(br_neg_y, instructions_.size());
+            ValueRef q3 = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(-kPi), a, "-pi - a");
+            emit_move(RegisterClass::Temporary, a.base_index, 0x1, q3);
+            patch_br(br_done, instructions_.size());
+            patch_br(br_pos_x, instructions_.size());
+            pop_scope();
+        }
         a.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return a;
     };
@@ -1599,11 +1662,10 @@ ValueRef UsseCodeGenerator::emit_acos(const ValueRef& x) {
     uint8_t n = std::clamp<uint8_t>(x.count, 1, 4);
     auto acos_scalar = [&](const ValueRef& sx) -> ValueRef {
         ValueRef res = make_temp_vec4(1);
-        push_scope();
-        ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
-        // Clamp ax to [0, 1] via min(ax, 1.0)
         ValueRef c_ax = make_temp_vec4(1);
         {
+            push_scope();
+            ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
             ValueRef ax_t = materialize_to_temp(ax, 1);
             ValueRef one_t = materialize_to_temp(make_const_scalar(1.0f), 1);
             Vec4Swiz sw4 = Vec4Swiz::XXXX; HardwareRegister hw_s2 = to_hw_src2(one_t, sw4);
@@ -1614,26 +1676,44 @@ ValueRef UsseCodeGenerator::emit_acos(const ValueRef& x) {
             imin.src0 = hw_s1; imin.src1 = hw_s2; imin.write_mask = 0x1;
             imin.src1_swiz12 = sw12; imin.src2_swiz4 = sw4;
             emit_inst(std::move(imin));
+            pop_scope();
         }
-        ValueRef poly = emit_binary_alu(frontend::BinaryOp::Sub,
-                                        make_const_scalar(0.0742610f),
-                                        emit_binary_alu(frontend::BinaryOp::Mul, c_ax, make_const_scalar(0.0187293f)));
-        poly = emit_binary_alu(frontend::BinaryOp::Add,
-                               make_const_scalar(-0.2121144f),
-                               emit_binary_alu(frontend::BinaryOp::Mul, c_ax, poly));
-        poly = emit_binary_alu(frontend::BinaryOp::Add,
-                               make_const_scalar(1.5707288f),
-                               emit_binary_alu(frontend::BinaryOp::Mul, c_ax, poly));
-        ValueRef raw = emit_binary_alu(frontend::BinaryOp::Mul,
-                                       emit_sqrt(emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(1.0f), c_ax)),
-                                       poly, "acos poly");
-        emit_move(RegisterClass::Temporary, res.base_index, 0x1, raw, "acos res");
-        emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "acos x<0");
-        size_t br_pos = emit_br(0, ExtPredicate::NegP0, "acos x>=0");
-        ValueRef mirrored = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), res, "pi - acos(|x|)");
-        emit_move(RegisterClass::Temporary, res.base_index, 0x1, mirrored);
-        patch_br(br_pos, instructions_.size());
-        pop_scope();
+        {
+            push_scope();
+            ValueRef poly = emit_binary_alu(frontend::BinaryOp::Sub,
+                                            make_const_scalar(0.0742610f),
+                                            emit_binary_alu(frontend::BinaryOp::Mul, c_ax, make_const_scalar(0.0187293f)));
+            emit_move(RegisterClass::Temporary, res.base_index, 0x1, poly);
+            pop_scope();
+        }
+        {
+            push_scope();
+            ValueRef poly = emit_binary_alu(frontend::BinaryOp::Add,
+                                            make_const_scalar(-0.2121144f),
+                                            emit_binary_alu(frontend::BinaryOp::Mul, c_ax, res));
+            emit_move(RegisterClass::Temporary, res.base_index, 0x1, poly);
+            pop_scope();
+        }
+        {
+            push_scope();
+            ValueRef poly = emit_binary_alu(frontend::BinaryOp::Add,
+                                            make_const_scalar(1.5707288f),
+                                            emit_binary_alu(frontend::BinaryOp::Mul, c_ax, res));
+            ValueRef raw = emit_binary_alu(frontend::BinaryOp::Mul,
+                                           emit_sqrt(emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(1.0f), c_ax)),
+                                           poly, "acos poly");
+            emit_move(RegisterClass::Temporary, res.base_index, 0x1, raw, "acos res");
+            pop_scope();
+        }
+        {
+            push_scope();
+            emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "acos x<0");
+            size_t br_pos = emit_br(0, ExtPredicate::NegP0, "acos x>=0");
+            ValueRef mirrored = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), res, "pi - acos(|x|)");
+            emit_move(RegisterClass::Temporary, res.base_index, 0x1, mirrored);
+            patch_br(br_pos, instructions_.size());
+            pop_scope();
+        }
         res.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return res;
     };

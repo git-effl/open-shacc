@@ -323,8 +323,9 @@ void RegisterAllocator::erase_symbol(const std::string& name) {
 
 uint8_t RegisterAllocator::allocate_temp_vec4() {
     if (!free_vec4_slots_.empty()) {
-        uint8_t reg = free_vec4_slots_.back();
-        free_vec4_slots_.pop_back();
+        auto min_it = std::min_element(free_vec4_slots_.begin(), free_vec4_slots_.end());
+        uint8_t reg = *min_it;
+        free_vec4_slots_.erase(min_it);
         return reg;
     }
     // Keep strictly below 120 (SGX FPINTERNAL threshold for doubled F32 addressing)
