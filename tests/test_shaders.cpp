@@ -25,6 +25,20 @@ static int g_tests_failed = 0;
         } \
     } while(0)
 
+#define TEST_ASSERT_COMPILED(output_ptr, msg) \
+    do { \
+        if (!(output_ptr) || !(output_ptr)->programData) { \
+            std::cerr << "  [FAIL] " << msg << " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
+            if ((output_ptr) && (output_ptr)->diagnosticCount > 0 && (output_ptr)->diagnostics) { \
+                for (int32_t di = 0; di < (output_ptr)->diagnosticCount; ++di) { \
+                    std::cerr << "    diag[" << di << "]: " << ((output_ptr)->diagnostics[di].message ? (output_ptr)->diagnostics[di].message : "<null>") << "\n"; \
+                } \
+            } \
+            g_tests_failed++; \
+            return; \
+        } \
+    } while(0)
+
 static uint32_t read_u32(const uint8_t* base, size_t off) {
     uint32_t v = 0;
     std::memcpy(&v, base + off, sizeof(v));
@@ -412,7 +426,7 @@ void test_shadow_pcf_control_flow_and_helpers() {
     opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
 
     const SceShaccCgCompileOutput* output = sceShaccCgCompileProgram(&opts, nullptr, 0);
-    TEST_ASSERT(output != nullptr && output->programData != nullptr, "PCF shadow + loop + helper shader must compile");
+    TEST_ASSERT_COMPILED(output, "PCF shadow + loop + helper shader must compile");
 
     const uint8_t* bytes = output->programData;
     const uint32_t instr_count = read_u32(bytes, 0x3C);
@@ -783,7 +797,7 @@ void test_vitagl_real_world_ffp_and_glsl_translator() {
     vp_opts.mainSourceFile = ffp_v;
     vp_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
     const SceShaccCgCompileOutput* vp_res = sceShaccCgCompileProgram(&vp_opts, nullptr, 0);
-    TEST_ASSERT(vp_res != nullptr && vp_res->programData != nullptr, "vitaGL FFP multi-light vertex shader must compile");
+    TEST_ASSERT_COMPILED(vp_res, "vitaGL FFP multi-light vertex shader must compile");
     TEST_ASSERT(read_u32(vp_res->programData, 0x34) < 120u, "FFP vertex shader must stay under 120 temps");
     TEST_ASSERT((read_u32(vp_res->programData, 0x9C + 0x10) & 0x3u) == 0x3u, "CLP0 array[2] must set CLIP0 and CLIP1 flags");
     sceShaccCgDestroyCompileOutput(vp_res);
@@ -824,7 +838,7 @@ void test_vitagl_real_world_ffp_and_glsl_translator() {
     fp_opts.mainSourceFile = ffp_f;
     fp_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
     const SceShaccCgCompileOutput* fp_res = sceShaccCgCompileProgram(&fp_opts, nullptr, 0);
-    TEST_ASSERT(fp_res != nullptr && fp_res->programData != nullptr, "vitaGL FFP fragment shader must compile");
+    TEST_ASSERT_COMPILED(fp_res, "vitaGL FFP fragment shader must compile");
     TEST_ASSERT(read_u32(fp_res->programData, 0x34) < 120u, "FFP fragment shader must stay under 120 temps");
     TEST_ASSERT((read_u32(fp_res->programData, 0x14) & (1u << 3)) != 0u, "DISCARD_USED flag must be set");
     TEST_ASSERT((read_u32(fp_res->programData, 0x14) & (1u << 5)) != 0u, "SPRITECOORD flag must be set");
@@ -862,7 +876,7 @@ void test_vitagl_real_world_ffp_and_glsl_translator() {
     glsl_opts.mainSourceFile = glsl_trans;
     glsl_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
     const SceShaccCgCompileOutput* glsl_res = sceShaccCgCompileProgram(&glsl_opts, nullptr, 0);
-    TEST_ASSERT(glsl_res != nullptr && glsl_res->programData != nullptr, "vitaGL glsl_translator-style shader must compile");
+    TEST_ASSERT_COMPILED(glsl_res, "vitaGL glsl_translator-style shader must compile");
     TEST_ASSERT(read_u32(glsl_res->programData, 0x34) < 120u, "glsl_translator shader must stay under 120 temps");
     sceShaccCgDestroyCompileOutput(glsl_res);
 

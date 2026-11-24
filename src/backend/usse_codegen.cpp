@@ -868,16 +868,26 @@ ValueRef UsseCodeGenerator::emit_binary_alu(
 
     // 2. Division via reciprocal + multiply
     if (op == frontend::BinaryOp::Div) {
+        ValueRef out = make_temp_vec4(n);
+        push_scope();
         ValueRef inv_rhs = emit_vcomp_vec(UsseOpcode::VRCP, rhs_in, comment.empty() ? "rcp" : comment);
-        return emit_binary_alu(frontend::BinaryOp::Mul, lhs_in, inv_rhs, comment);
+        ValueRef prod = emit_binary_alu(frontend::BinaryOp::Mul, lhs_in, inv_rhs, comment);
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), prod, comment);
+        pop_scope();
+        return out;
     }
 
     // 3. Modulo / fmod: x - y * trunc(x / y)
     if (op == frontend::BinaryOp::Mod) {
+        ValueRef out = make_temp_vec4(n);
+        push_scope();
         ValueRef q = emit_binary_alu(frontend::BinaryOp::Div, lhs_in, rhs_in, "mod div");
         ValueRef t = emit_trunc(q);
         ValueRef p = emit_binary_alu(frontend::BinaryOp::Mul, rhs_in, t, "mod mul");
-        return emit_binary_alu(frontend::BinaryOp::Sub, lhs_in, p, "mod sub");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Sub, lhs_in, p, "mod sub");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), res, "mod");
+        pop_scope();
+        return out;
     }
 
     // 4. Prepare scalar-to-vector broadcast swizzles
@@ -1256,6 +1266,8 @@ ValueRef UsseCodeGenerator::emit_floor(const ValueRef& x) {
         for (uint8_t i = 0; i < x.count; ++i) res[i] = std::floor(x.const_vals[i]);
         return make_const_vec(res, x.count);
     }
+    ValueRef out = make_temp_vec4(x.count);
+    push_scope();
     ValueRef f = make_temp_vec4(x.count);
     uint16_t sw12 = kSwiz12XYZW;
     HardwareRegister hw_s1 = to_hw_src1(x, sw12);
@@ -1274,7 +1286,10 @@ ValueRef UsseCodeGenerator::emit_floor(const ValueRef& x) {
     frc.comment = "frac for floor";
     emit_inst(std::move(frc));
 
-    return emit_binary_alu(frontend::BinaryOp::Sub, x, f, "floor");
+    ValueRef sub = emit_binary_alu(frontend::BinaryOp::Sub, x, f, "floor");
+    emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(x.count), sub, "floor");
+    pop_scope();
+    return out;
 }
 
 ValueRef UsseCodeGenerator::emit_ceil(const ValueRef& x) {
@@ -1291,37 +1306,33 @@ ValueRef UsseCodeGenerator::emit_trunc(const ValueRef& x) {
         for (uint8_t i = 0; i < x.count; ++i) res[i] = std::trunc(x.const_vals[i]);
         return make_const_vec(res, x.count);
     }
-    ValueRef ax = x;
-    ax.is_negated = false;
-    ax.is_absolute = true;
-    ValueRef fl = emit_floor(ax);
-    // Multiply by sign(x): +1 if x >= 0 else -1 (Wait: if x < 0 negate floor(|x|))
-    // Using sign(x) via x / max(|x|, 1e-12) or component check; simplest is float floor(x) + step adjustment:
-    // trunc(x) = (x >= 0) ? floor(x) : -floor(-x)
-    ValueRef nx = x;
-    nx.is_negated = !nx.is_negated;
-    ValueRef fneg = emit_floor(nx);
-    fneg.is_negated = !fneg.is_negated;
-    ValueRef fpos = emit_floor(x);
-    // Compute per-component blend mask: is_neg = (x < 0.0) -> for scalars/vecs compare per component
     if (x.count == 1) {
-        emit_vtst_p0(x, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "trunc sign");
         ValueRef dst = make_temp_vec4(1);
+        push_scope();
+        ValueRef nx = x;
+        nx.is_negated = !nx.is_negated;
+        ValueRef fneg = emit_floor(nx);
+        fneg.is_negated = !fneg.is_negated;
+        ValueRef fpos = emit_floor(x);
+        emit_vtst_p0(x, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "trunc sign");
         emit_move(RegisterClass::Temporary, dst.base_index, 0x1, fpos, "trunc pos");
         size_t br_end = emit_br(0, ExtPredicate::NegP0, "skip trunc neg");
         emit_move(RegisterClass::Temporary, dst.base_index, 0x1, fneg, "trunc neg");
         patch_br(br_end, instructions_.size());
+        pop_scope();
         dst.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return dst;
     }
     ValueRef dst = make_temp_vec4(x.count);
     for (uint8_t c = 0; c < x.count; ++c) {
+        push_scope();
         ValueRef xc = x;
         xc.count = 1;
         xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
         ValueRef tr = emit_trunc(xc);
         std::array<uint8_t, 4> map = {0, 0, 0, 0};
         emit_move_mapped(RegisterClass::Temporary, dst.base_index, static_cast<uint8_t>(1u << c), map, tr, "trunc lane");
+        pop_scope();
     }
     return dst;
 }
@@ -1332,9 +1343,13 @@ ValueRef UsseCodeGenerator::emit_sqrt(const ValueRef& x) {
         for (uint8_t i = 0; i < x.count; ++i) res[i] = (x.const_vals[i] > 0.0f) ? std::sqrt(x.const_vals[i]) : 0.0f;
         return make_const_vec(res, x.count);
     }
-    // Clamp below by tiny epsilon or multiply x * rsqrt(max(x, 1e-12)) so sqrt(0) = 0 (not Inf/NaN)
+    ValueRef out = make_temp_vec4(x.count);
+    push_scope();
     ValueRef rsq = emit_vcomp_vec(UsseOpcode::VRSQ, x, "sqrt rsqrt");
-    return emit_binary_alu(frontend::BinaryOp::Mul, x, rsq, "sqrt mul");
+    ValueRef res = emit_binary_alu(frontend::BinaryOp::Mul, x, rsq, "sqrt mul");
+    emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(x.count), res, "sqrt");
+    pop_scope();
+    return out;
 }
 
 ValueRef UsseCodeGenerator::emit_pow(const ValueRef& x, const ValueRef& y) {
@@ -1348,9 +1363,15 @@ ValueRef UsseCodeGenerator::emit_pow(const ValueRef& x, const ValueRef& y) {
         }
         return make_const_vec(res, n);
     }
+    uint8_t n = std::max(x.count, y.count);
+    ValueRef out = make_temp_vec4(n);
+    push_scope();
     ValueRef lx = emit_vcomp_vec(UsseOpcode::VLOG, x, "pow log2");
     ValueRef prod = emit_binary_alu(frontend::BinaryOp::Mul, lx, y, "pow y*log2(x)");
-    return emit_vcomp_vec(UsseOpcode::VEXP, prod, "pow exp2");
+    ValueRef res = emit_vcomp_vec(UsseOpcode::VEXP, prod, "pow exp2");
+    emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n), res, "pow");
+    pop_scope();
+    return out;
 }
 
 ValueRef UsseCodeGenerator::emit_sin_cos(const ValueRef& x_in, bool is_cos) {
@@ -1370,54 +1391,74 @@ ValueRef UsseCodeGenerator::emit_sin_cos(const ValueRef& x_in, bool is_cos) {
     constexpr float kC = -0.40528473456f;  // -4 / pi^2
     constexpr float kP = 0.225f;
 
-    ValueRef x = x_in;
-    if (is_cos) {
-        x = emit_binary_alu(frontend::BinaryOp::Add, x, make_const_scalar(kHalfPi), "cos shift");
-    }
+    uint8_t n = std::clamp<uint8_t>(x_in.count, 1, 4);
+    uint8_t wmask = mask_for_count(n);
+    ValueRef out = make_temp_vec4(n);
 
-    // Range-reduce x into [-pi, pi]: xr = frac(x * (1/2pi) + 0.5) * 2pi - pi
-    ValueRef scaled = emit_binary_alu(frontend::BinaryOp::Mul, x, make_const_scalar(kInvTwoPi), "sin/cos inv2pi");
-    ValueRef shifted = emit_binary_alu(frontend::BinaryOp::Add, scaled, make_const_scalar(0.5f), "sin/cos +0.5");
-
-    ValueRef frc = make_temp_vec4(x.count);
+    // Phase 1: Range-reduce x into [-pi, pi] inside out, then release all phase-1 temps
     {
-        uint16_t sw12 = kSwiz12XYZW;
-        HardwareRegister hw_s1 = to_hw_src1(shifted, sw12);
-        Vec4Swiz sw4 = Vec4Swiz::XYZW;
-        HardwareRegister hw_s2 = to_hw_src2(shifted, sw4);
-        UsseInstruction inst;
-        inst.opcode = UsseOpcode::VFRC;
-        inst.dst.reg_class = RegisterClass::Temporary;
-        inst.dst.index = static_cast<uint8_t>(frc.base_index);
-        inst.src0 = hw_s1;
-        inst.src1 = hw_s2;
-        inst.write_mask = mask_for_count(x.count);
-        inst.src1_swiz12 = sw12;
-        inst.src2_swiz4 = sw4;
-        inst.comment = "sin/cos frac";
-        emit_inst(std::move(inst));
+        push_scope();
+        ValueRef x = x_in;
+        if (is_cos) {
+            x = emit_binary_alu(frontend::BinaryOp::Add, x, make_const_scalar(kHalfPi), "cos shift");
+        }
+        ValueRef scaled = emit_binary_alu(frontend::BinaryOp::Mul, x, make_const_scalar(kInvTwoPi), "sin/cos inv2pi");
+        ValueRef shifted = emit_binary_alu(frontend::BinaryOp::Add, scaled, make_const_scalar(0.5f), "sin/cos +0.5");
+
+        ValueRef frc = make_temp_vec4(n);
+        {
+            uint16_t sw12 = kSwiz12XYZW;
+            HardwareRegister hw_s1 = to_hw_src1(shifted, sw12);
+            Vec4Swiz sw4 = Vec4Swiz::XYZW;
+            HardwareRegister hw_s2 = to_hw_src2(shifted, sw4);
+            UsseInstruction inst;
+            inst.opcode = UsseOpcode::VFRC;
+            inst.dst.reg_class = RegisterClass::Temporary;
+            inst.dst.index = static_cast<uint8_t>(frc.base_index);
+            inst.src0 = hw_s1;
+            inst.src1 = hw_s2;
+            inst.write_mask = wmask;
+            inst.src1_swiz12 = sw12;
+            inst.src2_swiz4 = sw4;
+            inst.comment = "sin/cos frac";
+            emit_inst(std::move(inst));
+        }
+
+        ValueRef xr = emit_binary_alu(frontend::BinaryOp::Sub,
+                                      emit_binary_alu(frontend::BinaryOp::Mul, frc, make_const_scalar(kTwoPi), "sin/cos *2pi"),
+                                      make_const_scalar(kPi), "sin/cos -pi");
+        emit_move(RegisterClass::Temporary, out.base_index, wmask, xr, "sin/cos xr");
+        pop_scope();
     }
 
-    ValueRef xr = emit_binary_alu(frontend::BinaryOp::Sub,
-                                  emit_binary_alu(frontend::BinaryOp::Mul, frc, make_const_scalar(kTwoPi), "sin/cos *2pi"),
-                                  make_const_scalar(kPi), "sin/cos -pi");
+    // Phase 2: y = B * xr + C * xr * |xr|, overwrite out with y, release phase-2 temps
+    {
+        push_scope();
+        ValueRef abs_xr = out;
+        abs_xr.is_absolute = true;
+        ValueRef term1 = emit_binary_alu(frontend::BinaryOp::Mul, out, make_const_scalar(kB), "sin B*x");
+        ValueRef term2 = emit_binary_alu(frontend::BinaryOp::Mul,
+                                         emit_binary_alu(frontend::BinaryOp::Mul, out, abs_xr, "x*|x|"),
+                                         make_const_scalar(kC), "C*x*|x|");
+        ValueRef y = emit_binary_alu(frontend::BinaryOp::Add, term1, term2, "sin poly y");
+        emit_move(RegisterClass::Temporary, out.base_index, wmask, y, "sin/cos y");
+        pop_scope();
+    }
 
-    // y = B * xr + C * xr * |xr|
-    ValueRef abs_xr = xr;
-    abs_xr.is_absolute = true;
-    ValueRef term1 = emit_binary_alu(frontend::BinaryOp::Mul, xr, make_const_scalar(kB), "sin B*x");
-    ValueRef term2 = emit_binary_alu(frontend::BinaryOp::Mul,
-                                     emit_binary_alu(frontend::BinaryOp::Mul, xr, abs_xr, "x*|x|"),
-                                     make_const_scalar(kC), "C*x*|x|");
-    ValueRef y = emit_binary_alu(frontend::BinaryOp::Add, term1, term2, "sin poly y");
+    // Phase 3: y + P * (y * |y| - y), store into out, release phase-3 temps
+    {
+        push_scope();
+        ValueRef abs_y = out;
+        abs_y.is_absolute = true;
+        ValueRef y_abs_y = emit_binary_alu(frontend::BinaryOp::Mul, out, abs_y, "y*|y|");
+        ValueRef diff = emit_binary_alu(frontend::BinaryOp::Sub, y_abs_y, out, "y*|y|-y");
+        ValueRef corr = emit_binary_alu(frontend::BinaryOp::Mul, diff, make_const_scalar(kP), "P*(y*|y|-y)");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Add, out, corr, is_cos ? "cos result" : "sin result");
+        emit_move(RegisterClass::Temporary, out.base_index, wmask, res, is_cos ? "cos" : "sin");
+        pop_scope();
+    }
 
-    // y + P * (y * |y| - y)
-    ValueRef abs_y = y;
-    abs_y.is_absolute = true;
-    ValueRef y_abs_y = emit_binary_alu(frontend::BinaryOp::Mul, y, abs_y, "y*|y|");
-    ValueRef diff = emit_binary_alu(frontend::BinaryOp::Sub, y_abs_y, y, "y*|y|-y");
-    ValueRef corr = emit_binary_alu(frontend::BinaryOp::Mul, diff, make_const_scalar(kP), "P*(y*|y|-y)");
-    return emit_binary_alu(frontend::BinaryOp::Add, y, corr, is_cos ? "cos result" : "sin result");
+    return out;
 }
 
 ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
@@ -1430,6 +1471,8 @@ ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
     uint8_t n = std::clamp<uint8_t>(x.count, 1, 4);
 
     auto atan_scalar = [&](const ValueRef& sx) -> ValueRef {
+        ValueRef mag = make_temp_vec4(1);
+        push_scope();
         ValueRef ax = sx;
         ax.is_negated = false;
         ax.is_absolute = true;
@@ -1458,7 +1501,8 @@ ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
                                      make_const_scalar(0.995354f),
                                      emit_binary_alu(frontend::BinaryOp::Mul, r2, p),
                                      "atan q");
-        ValueRef mag = emit_binary_alu(frontend::BinaryOp::Mul, r, q, "atan_small");
+        ValueRef raw_mag = emit_binary_alu(frontend::BinaryOp::Mul, r, q, "atan_small");
+        emit_move(RegisterClass::Temporary, mag.base_index, 0x1, raw_mag, "atan mag");
 
         emit_vtst_p0(ax, make_const_scalar(1.0f), VtstSignTest::GtOrGe, VtstZeroTest::ExcludeZero, "|x|>1");
         size_t br_fold = emit_br(0, ExtPredicate::NegP0, "skip pi/2-atan");
@@ -1471,17 +1515,21 @@ ValueRef UsseCodeGenerator::emit_atan(const ValueRef& x) {
         ValueRef neg_mag = mag; neg_mag.is_negated = !neg_mag.is_negated;
         emit_move(RegisterClass::Temporary, mag.base_index, 0x1, neg_mag, "atan neg");
         patch_br(br_sign, instructions_.size());
+        pop_scope();
+        mag.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return mag;
     };
 
     if (n == 1) return atan_scalar(x);
     ValueRef out = make_temp_vec4(n);
     for (uint8_t c = 0; c < n; ++c) {
+        push_scope();
         ValueRef xc = x; xc.count = 1;
         xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
         ValueRef ac = atan_scalar(xc);
         std::array<uint8_t, 4> map = {0, 0, 0, 0};
         emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "atan lane");
+        pop_scope();
     }
     return out;
 }
@@ -1500,9 +1548,13 @@ ValueRef UsseCodeGenerator::emit_atan2(const ValueRef& y, const ValueRef& x) {
     }
     constexpr float kPi = 3.14159265359f;
     auto atan2_scalar = [&](const ValueRef& sy, const ValueRef& sx) -> ValueRef {
+        ValueRef a = make_temp_vec4(1);
+        push_scope();
         ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
         ValueRef denom = emit_binary_alu(frontend::BinaryOp::Add, ax, make_const_scalar(1e-6f), "atan2 denom");
-        ValueRef a = materialize_to_temp(emit_atan(emit_binary_alu(frontend::BinaryOp::Div, sy, denom, "atan2 y/|x|")), 1, "atan2 a");
+        ValueRef ratio = emit_binary_alu(frontend::BinaryOp::Div, sy, denom, "atan2 y/|x|");
+        ValueRef base_a = emit_atan(ratio);
+        emit_move(RegisterClass::Temporary, a.base_index, 0x1, base_a, "atan2 a");
 
         emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "atan2 x<0");
         size_t br_pos_x = emit_br(0, ExtPredicate::NegP0, "x >= 0");
@@ -1516,12 +1568,15 @@ ValueRef UsseCodeGenerator::emit_atan2(const ValueRef& y, const ValueRef& x) {
         emit_move(RegisterClass::Temporary, a.base_index, 0x1, q3);
         patch_br(br_done, instructions_.size());
         patch_br(br_pos_x, instructions_.size());
+        pop_scope();
+        a.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return a;
     };
 
     if (n == 1) return atan2_scalar(y, x);
     ValueRef out = make_temp_vec4(n);
     for (uint8_t c = 0; c < n; ++c) {
+        push_scope();
         ValueRef yc = y; yc.count = 1;
         if (y.count > 1) yc.swiz = {y.swiz[c], y.swiz[c], y.swiz[c], y.swiz[c]};
         ValueRef xc = x; xc.count = 1;
@@ -1529,6 +1584,7 @@ ValueRef UsseCodeGenerator::emit_atan2(const ValueRef& y, const ValueRef& x) {
         ValueRef ac = atan2_scalar(yc, xc);
         std::array<uint8_t, 4> map = {0, 0, 0, 0};
         emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "atan2 lane");
+        pop_scope();
     }
     return out;
 }
@@ -1542,6 +1598,8 @@ ValueRef UsseCodeGenerator::emit_acos(const ValueRef& x) {
     constexpr float kPi = 3.14159265359f;
     uint8_t n = std::clamp<uint8_t>(x.count, 1, 4);
     auto acos_scalar = [&](const ValueRef& sx) -> ValueRef {
+        ValueRef res = make_temp_vec4(1);
+        push_scope();
         ValueRef ax = sx; ax.is_negated = false; ax.is_absolute = true;
         // Clamp ax to [0, 1] via min(ax, 1.0)
         ValueRef c_ax = make_temp_vec4(1);
@@ -1566,26 +1624,29 @@ ValueRef UsseCodeGenerator::emit_acos(const ValueRef& x) {
         poly = emit_binary_alu(frontend::BinaryOp::Add,
                                make_const_scalar(1.5707288f),
                                emit_binary_alu(frontend::BinaryOp::Mul, c_ax, poly));
-        ValueRef res = materialize_to_temp(
-            emit_binary_alu(frontend::BinaryOp::Mul,
-                            emit_sqrt(emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(1.0f), c_ax)),
-                            poly, "acos poly"),
-            1, "acos res");
+        ValueRef raw = emit_binary_alu(frontend::BinaryOp::Mul,
+                                       emit_sqrt(emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(1.0f), c_ax)),
+                                       poly, "acos poly");
+        emit_move(RegisterClass::Temporary, res.base_index, 0x1, raw, "acos res");
         emit_vtst_p0(sx, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "acos x<0");
         size_t br_pos = emit_br(0, ExtPredicate::NegP0, "acos x>=0");
         ValueRef mirrored = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kPi), res, "pi - acos(|x|)");
         emit_move(RegisterClass::Temporary, res.base_index, 0x1, mirrored);
         patch_br(br_pos, instructions_.size());
+        pop_scope();
+        res.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
         return res;
     };
     if (n == 1) return acos_scalar(x);
     ValueRef out = make_temp_vec4(n);
     for (uint8_t c = 0; c < n; ++c) {
+        push_scope();
         ValueRef xc = x; xc.count = 1;
         xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
         ValueRef ac = acos_scalar(xc);
         std::array<uint8_t, 4> map = {0, 0, 0, 0};
         emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, ac, "acos lane");
+        pop_scope();
     }
     return out;
 }
@@ -1597,7 +1658,12 @@ ValueRef UsseCodeGenerator::emit_asin(const ValueRef& x) {
         return make_const_vec(res, x.count);
     }
     constexpr float kHalfPi = 1.57079632679f;
-    return emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), emit_acos(x), "asin");
+    ValueRef out = make_temp_vec4(x.count);
+    push_scope();
+    ValueRef res = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(kHalfPi), emit_acos(x), "asin");
+    emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(x.count), res, "asin");
+    pop_scope();
+    return out;
 }
 
 ValueRef UsseCodeGenerator::emit_matrix_mul(const ValueRef& lhs, const ValueRef& rhs) {
@@ -2961,20 +3027,28 @@ ValueRef UsseCodeGenerator::generate_unary_op(const frontend::UnaryExpr* un) {
 }
 
 ValueRef UsseCodeGenerator::generate_ternary(const frontend::TernaryExpr* tern) {
+    ValueRef dst = make_temp_vec4(4);
+    push_scope();
     emit_condition_to_p0(tern->condition.get());
+    pop_scope();
     size_t br_else = emit_br(0, ExtPredicate::NegP0, "ternary false");
 
-    ValueRef dst = make_temp_vec4(4);
+    push_scope();
     ValueRef t_val = generate_expr(tern->then_expr.get());
     emit_move(RegisterClass::Temporary, dst.base_index, mask_for_count(t_val.count), t_val, "ternary then");
+    uint8_t t_cnt = t_val.count;
+    pop_scope();
     size_t br_end = emit_br(0, ExtPredicate::None, "ternary end");
 
     patch_br(br_else, instructions_.size());
+    push_scope();
     ValueRef e_val = generate_expr(tern->else_expr.get());
     emit_move(RegisterClass::Temporary, dst.base_index, mask_for_count(e_val.count), e_val, "ternary else");
+    uint8_t e_cnt = e_val.count;
+    pop_scope();
 
     patch_br(br_end, instructions_.size());
-    dst.count = std::max(t_val.count, e_val.count);
+    dst.count = std::max(t_cnt, e_cnt);
     return dst;
 }
 
@@ -3536,6 +3610,8 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
     }
 
     if (fn == "cross" && call->arguments.size() >= 2) {
+        ValueRef out = make_temp_vec4(3);
+        push_scope();
         ValueRef a = generate_expr(call->arguments[0].get());
         ValueRef b = generate_expr(call->arguments[1].get());
         ValueRef a_yzx = a; a_yzx.count = 3; a_yzx.swiz = {a.swiz[1], a.swiz[2], a.swiz[0], a.swiz[0]};
@@ -3544,42 +3620,76 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         ValueRef b_yzx = b; b_yzx.count = 3; b_yzx.swiz = {b.swiz[1], b.swiz[2], b.swiz[0], b.swiz[0]};
         ValueRef t0 = emit_binary_alu(frontend::BinaryOp::Mul, a_yzx, b_zxy, "cross L");
         ValueRef t1 = emit_binary_alu(frontend::BinaryOp::Mul, a_zxy, b_yzx, "cross R");
-        return emit_binary_alu(frontend::BinaryOp::Sub, t0, t1, "cross");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Sub, t0, t1, "cross");
+        emit_move(RegisterClass::Temporary, out.base_index, 0b0111, res, "cross");
+        pop_scope();
+        return out;
     }
 
     if (fn == "length" && !call->arguments.empty()) {
+        ValueRef out = make_temp_vec4(1);
+        push_scope();
         ValueRef v = generate_expr(call->arguments[0].get());
         ValueRef dp = emit_dp(v, v, v.count, "length dot");
-        return emit_sqrt(dp);
+        emit_move(RegisterClass::Temporary, out.base_index, 0x1, emit_sqrt(dp), "length");
+        pop_scope();
+        out.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+        return out;
     }
 
     if (fn == "distance" && call->arguments.size() >= 2) {
+        ValueRef out = make_temp_vec4(1);
+        push_scope();
         ValueRef diff = emit_binary_alu(frontend::BinaryOp::Sub,
                                         generate_expr(call->arguments[0].get()),
                                         generate_expr(call->arguments[1].get()), "distance diff");
-        return emit_sqrt(emit_dp(diff, diff, diff.count, "distance dot"));
+        emit_move(RegisterClass::Temporary, out.base_index, 0x1,
+                  emit_sqrt(emit_dp(diff, diff, diff.count, "distance dot")), "distance");
+        pop_scope();
+        out.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+        return out;
     }
 
     if (fn == "normalize" && !call->arguments.empty()) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t n_cnt = 4;
+        push_scope();
         ValueRef v = generate_expr(call->arguments[0].get());
+        n_cnt = v.count;
         ValueRef dp = emit_dp(v, v, v.count, "normalize dot");
         ValueRef rsq = emit_vcomp_vec(UsseOpcode::VRSQ, dp, "normalize rsqrt");
-        return emit_binary_alu(frontend::BinaryOp::Mul, v, rsq, "normalize scale");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Mul, v, rsq, "normalize scale");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n_cnt), res, "normalize");
+        pop_scope();
+        out.count = n_cnt;
+        return out;
     }
 
     if (fn == "reflect" && call->arguments.size() >= 2) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t cnt = 4;
+        push_scope();
         ValueRef i_vec = generate_expr(call->arguments[0].get());
         ValueRef n_vec = generate_expr(call->arguments[1].get());
-        ValueRef dp = emit_dp(n_vec, i_vec, std::max(i_vec.count, n_vec.count), "reflect dot");
+        cnt = std::max(i_vec.count, n_vec.count);
+        ValueRef dp = emit_dp(n_vec, i_vec, cnt, "reflect dot");
         ValueRef k = emit_binary_alu(frontend::BinaryOp::Mul, dp, make_const_scalar(2.0f), "2*dot");
         ValueRef term = emit_binary_alu(frontend::BinaryOp::Mul, n_vec, k, "2*dot*N");
-        return emit_binary_alu(frontend::BinaryOp::Sub, i_vec, term, "reflect");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Sub, i_vec, term, "reflect");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), res, "reflect");
+        pop_scope();
+        out.count = cnt;
+        return out;
     }
 
     if (fn == "refract" && call->arguments.size() >= 3) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t cnt = 4;
+        push_scope();
         ValueRef i_vec = generate_expr(call->arguments[0].get());
         ValueRef n_vec = generate_expr(call->arguments[1].get());
         ValueRef eta = generate_expr(call->arguments[2].get());
+        cnt = i_vec.count;
         ValueRef ndoti = emit_dp(n_vec, i_vec, std::max(i_vec.count, n_vec.count), "refract N.I");
         ValueRef one = make_const_scalar(1.0f);
         ValueRef k = emit_binary_alu(
@@ -3593,8 +3703,7 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             "refract k"
         );
         emit_vtst_p0(k, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "refract TIR");
-        ValueRef out = make_temp_vec4(i_vec.count);
-        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(i_vec.count), make_const_scalar(0.0f), "refract 0");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), make_const_scalar(0.0f), "refract 0");
         size_t br_tir = emit_br(0, ExtPredicate::P0, "refract k<0");
         ValueRef term1 = emit_binary_alu(frontend::BinaryOp::Mul, eta, i_vec, "eta*I");
         ValueRef factor = emit_binary_alu(frontend::BinaryOp::Add,
@@ -3602,24 +3711,31 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
                                           emit_sqrt(k), "refract factor");
         ValueRef res = emit_binary_alu(frontend::BinaryOp::Sub, term1,
                                        emit_binary_alu(frontend::BinaryOp::Mul, factor, n_vec), "refract res");
-        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(i_vec.count), res);
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), res);
         patch_br(br_tir, instructions_.size());
+        pop_scope();
+        out.count = cnt;
         return out;
     }
 
     if (fn == "faceforward" && call->arguments.size() >= 3) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t cnt = 4;
+        push_scope();
         ValueRef n = generate_expr(call->arguments[0].get());
         ValueRef i = generate_expr(call->arguments[1].get());
         ValueRef ng = generate_expr(call->arguments[2].get());
+        cnt = n.count;
         ValueRef dp = emit_dp(ng, i, std::max(ng.count, i.count), "faceforward dot");
         emit_vtst_p0(dp, make_const_scalar(0.0f), VtstSignTest::LtOrLe, VtstZeroTest::ExcludeZero, "ng.i < 0");
-        ValueRef out = make_temp_vec4(n.count);
-        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n.count), n);
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), n);
         size_t br_neg = emit_br(0, ExtPredicate::P0, "faceforward keep");
         ValueRef neg_n = n;
         neg_n.is_negated = !neg_n.is_negated;
-        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(n.count), neg_n);
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), neg_n);
         patch_br(br_neg, instructions_.size());
+        pop_scope();
+        out.count = cnt;
         return out;
     }
 
@@ -3665,6 +3781,8 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         ValueRef lo = generate_expr(call->arguments[1].get());
         ValueRef hi = generate_expr(call->arguments[2].get());
         uint8_t n = std::max({x.count, lo.count, hi.count});
+        ValueRef dst = make_temp_vec4(n);
+        push_scope();
         if (x.count == 1 && n > 1) { x.swiz = {x.swiz[0], x.swiz[0], x.swiz[0], x.swiz[0]}; x.count = n; }
         if (lo.count == 1 && n > 1) { lo.swiz = {lo.swiz[0], lo.swiz[0], lo.swiz[0], lo.swiz[0]}; lo.count = n; }
         if (hi.count == 1 && n > 1) { hi.swiz = {hi.swiz[0], hi.swiz[0], hi.swiz[0], hi.swiz[0]}; hi.count = n; }
@@ -3688,7 +3806,6 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         imax.comment = "clamp min";
         emit_inst(std::move(imax));
 
-        ValueRef dst = make_temp_vec4(n);
         Vec4Swiz sw4_hi = Vec4Swiz::XYZW;
         HardwareRegister hw_hi = to_hw_src2(hi, sw4_hi);
         uint16_t sw12_t = kSwiz12XYZW;
@@ -3704,6 +3821,7 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         imin.src2_swiz4 = sw4_hi;
         imin.comment = "clamp max";
         emit_inst(std::move(imin));
+        pop_scope();
         return dst;
     }
 
@@ -3715,6 +3833,8 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             return make_const_vec(res, x.count);
         }
         uint8_t n = x.count;
+        ValueRef dst = make_temp_vec4(n);
+        push_scope();
         ValueRef zero_v = materialize_to_temp(make_const_scalar(0.0f), n, "0.0");
         ValueRef one_v = materialize_to_temp(make_const_scalar(1.0f), n, "1.0");
         ValueRef t = make_temp_vec4(n);
@@ -3734,7 +3854,6 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         imax.comment = "saturate floor 0";
         emit_inst(std::move(imax));
 
-        ValueRef dst = make_temp_vec4(n);
         Vec4Swiz sw4_1 = Vec4Swiz::XYZW;
         HardwareRegister hw_1 = to_hw_src2(one_v, sw4_1);
         uint16_t sw12_t = kSwiz12XYZW;
@@ -3750,17 +3869,26 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         imin.src2_swiz4 = sw4_1;
         imin.comment = "saturate ceil 1";
         emit_inst(std::move(imin));
+        pop_scope();
         return dst;
     }
 
     // 5. Interpolation / Shaping / Unary Math
     if ((fn == "lerp" || fn == "mix") && call->arguments.size() >= 3) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t cnt = 4;
+        push_scope();
         ValueRef a = generate_expr(call->arguments[0].get());
         ValueRef b = generate_expr(call->arguments[1].get());
         ValueRef t = generate_expr(call->arguments[2].get());
+        cnt = std::max({a.count, b.count, t.count});
         ValueRef diff = emit_binary_alu(frontend::BinaryOp::Sub, b, a, "lerp (b - a)");
         ValueRef scaled = emit_binary_alu(frontend::BinaryOp::Mul, diff, t, "lerp (b - a) * t");
-        return emit_binary_alu(frontend::BinaryOp::Add, a, scaled, "lerp a + ...");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Add, a, scaled, "lerp a + ...");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), res, "lerp");
+        pop_scope();
+        out.count = cnt;
+        return out;
     }
 
     if (fn == "step" && call->arguments.size() >= 2) {
@@ -3772,6 +3900,7 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         }
         ValueRef out = make_temp_vec4(n);
         for (uint8_t c = 0; c < n; ++c) {
+            push_scope();
             ValueRef ec = edge; ec.count = 1;
             if (edge.count > 1) ec.swiz = {edge.swiz[c], edge.swiz[c], edge.swiz[c], edge.swiz[c]};
             ValueRef xc = x; xc.count = 1;
@@ -3779,11 +3908,15 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             ValueRef sc = emit_compare_to_float(frontend::BinaryOp::GreaterEqual, xc, ec);
             std::array<uint8_t, 4> map = {0, 0, 0, 0};
             emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, sc, "step");
+            pop_scope();
         }
         return out;
     }
 
     if (fn == "smoothstep" && call->arguments.size() >= 3) {
+        ValueRef out = make_temp_vec4(4);
+        uint8_t cnt = 4;
+        push_scope();
         ValueRef e0 = generate_expr(call->arguments[0].get());
         ValueRef e1 = generate_expr(call->arguments[1].get());
         ValueRef x = generate_expr(call->arguments[2].get());
@@ -3791,6 +3924,7 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
                                      emit_binary_alu(frontend::BinaryOp::Sub, x, e0, "smoothstep num"),
                                      emit_binary_alu(frontend::BinaryOp::Sub, e1, e0, "smoothstep den"),
                                      "smoothstep t");
+        cnt = t.count;
         // saturate(t)
         ValueRef zero_v = materialize_to_temp(make_const_scalar(0.0f), t.count);
         ValueRef one_v = materialize_to_temp(make_const_scalar(1.0f), t.count);
@@ -3816,7 +3950,11 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         ValueRef t2 = emit_binary_alu(frontend::BinaryOp::Mul, ts, ts, "t*t");
         ValueRef s2 = emit_binary_alu(frontend::BinaryOp::Mul, make_const_scalar(2.0f), ts, "2*t");
         ValueRef poly = emit_binary_alu(frontend::BinaryOp::Sub, make_const_scalar(3.0f), s2, "3 - 2*t");
-        return emit_binary_alu(frontend::BinaryOp::Mul, t2, poly, "smoothstep");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Mul, t2, poly, "smoothstep");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(cnt), res, "smoothstep");
+        pop_scope();
+        out.count = cnt;
+        return out;
     }
 
     if (fn == "abs" && !call->arguments.empty()) {
@@ -3830,12 +3968,19 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
         ValueRef x = generate_expr(call->arguments[0].get());
         ValueRef zero = make_const_scalar(0.0f);
         if (x.count == 1) {
+            ValueRef out = make_temp_vec4(1);
+            push_scope();
             ValueRef pos = emit_compare_to_float(frontend::BinaryOp::Greater, x, zero);
             ValueRef neg = emit_compare_to_float(frontend::BinaryOp::Less, x, zero);
-            return emit_binary_alu(frontend::BinaryOp::Sub, pos, neg, "sign");
+            ValueRef s = emit_binary_alu(frontend::BinaryOp::Sub, pos, neg, "sign");
+            emit_move(RegisterClass::Temporary, out.base_index, 0x1, s, "sign");
+            pop_scope();
+            out.swiz = {SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X, SwizzleChannel::X};
+            return out;
         }
         ValueRef out = make_temp_vec4(x.count);
         for (uint8_t c = 0; c < x.count; ++c) {
+            push_scope();
             ValueRef xc = x; xc.count = 1;
             xc.swiz = {x.swiz[c], x.swiz[c], x.swiz[c], x.swiz[c]};
             ValueRef pos = emit_compare_to_float(frontend::BinaryOp::Greater, xc, zero);
@@ -3843,6 +3988,7 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             ValueRef s = emit_binary_alu(frontend::BinaryOp::Sub, pos, neg, "sign lane");
             std::array<uint8_t, 4> map = {0, 0, 0, 0};
             emit_move_mapped(RegisterClass::Temporary, out.base_index, static_cast<uint8_t>(1u << c), map, s);
+            pop_scope();
         }
         return out;
     }
@@ -3904,7 +4050,12 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
     if (fn == "cos" && !call->arguments.empty()) return emit_sin_cos(generate_expr(call->arguments[0].get()), true);
     if (fn == "tan" && !call->arguments.empty()) {
         ValueRef x = generate_expr(call->arguments[0].get());
-        return emit_binary_alu(frontend::BinaryOp::Div, emit_sin_cos(x, false), emit_sin_cos(x, true), "tan");
+        ValueRef out = make_temp_vec4(x.count);
+        push_scope();
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Div, emit_sin_cos(x, false), emit_sin_cos(x, true), "tan");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(x.count), res, "tan");
+        pop_scope();
+        return out;
     }
     if (fn == "atan" && !call->arguments.empty()) {
         if (call->arguments.size() >= 2) {
@@ -3947,6 +4098,8 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
     }
     if (fn == "fwidth" && !call->arguments.empty()) {
         ValueRef a = generate_expr(call->arguments[0].get());
+        ValueRef out = make_temp_vec4(a.count);
+        push_scope();
         auto call_deriv = [&](UsseOpcode op) {
             ValueRef dst = make_temp_vec4(a.count);
             uint16_t sw12 = kSwiz12XYZW; HardwareRegister hw_s1 = to_hw_src1(a, sw12);
@@ -3960,7 +4113,10 @@ ValueRef UsseCodeGenerator::generate_call(const frontend::CallExpr* call) {
             dst.is_absolute = true;
             return dst;
         };
-        return emit_binary_alu(frontend::BinaryOp::Add, call_deriv(UsseOpcode::VDSX), call_deriv(UsseOpcode::VDSY), "fwidth");
+        ValueRef res = emit_binary_alu(frontend::BinaryOp::Add, call_deriv(UsseOpcode::VDSX), call_deriv(UsseOpcode::VDSY), "fwidth");
+        emit_move(RegisterClass::Temporary, out.base_index, mask_for_count(a.count), res, "fwidth");
+        pop_scope();
+        return out;
     }
 
     if ((fn == "any" || fn == "all") && !call->arguments.empty()) {
