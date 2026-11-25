@@ -148,4 +148,5 @@ All sections are padded to 16-byte boundaries:
 ## License
 
 `open-shacc` is licensed under the [GNU General Public License 2.0](LICENSE).
+Uses parts of code from Vita3K (GPL2),Public PowerVR SGX / USSE Architecture & Mesa / Open-Source Shader ISA Documentation (MIT,GPL2) vita-headers (MIT) and Standard NVIDIA Cg (Public and Royalty-free) & HLSL Public Language Specifications (MIT)
 
