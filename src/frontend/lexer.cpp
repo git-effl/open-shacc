@@ -1,8 +1,6 @@
 /**
  * @file lexer.cpp
  * @brief Implementation of the Cg/HLSL tokenizer.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "lexer.hpp"
@@ -24,6 +22,7 @@ static const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"out",         TokenType::KwOut},
     {"inout",       TokenType::KwInOut},
     {"inline",      TokenType::KwInline},
+    {"__nativecolor", TokenType::KwNativeColor},
     {"return",      TokenType::KwReturn},
     {"discard",     TokenType::KwDiscard},
     {"if",          TokenType::KwIf},

@@ -1,15 +1,11 @@
 /**
  * @file open_shacc.h
- * @brief Open-source clean-room Cg/HLSL shader compiler targeting USSE / GXP.
+ * @brief Open-source clean-room Cg/HLSL shader compiler library targeting USSE and GXP.
  *
- * Designed as a clean-room specification-based compiler library for PS Vita and host platforms.
- * Built entirely from open industry specifications:
- *   - NVIDIA Cg Language Specification
- *   - Standard HLSL Shader Model specifications
- *   - Public Imagination Technologies USSE architecture documentation
- *   - PS Vita SceShaccCg ABI and SceGxm binary container specs
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * Implemented strictly from public open-source specifications:
+ *   - NVIDIA Cg Language Specification & Standard HLSL Shader Model syntax
+ *   - Public Imagination Technologies USSE architecture and ISA specifications
+ *   - Public SceGxmProgram (GXP) binary container layout and VitaSDK compilation ABIs
  */
 
 #ifndef OPEN_SHACC_H
@@ -21,10 +17,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* -------------------------------------------------------------------------- */
-/* API Visibility Macros                                                      */
-/* -------------------------------------------------------------------------- */
 
 #if defined(_WIN32) || defined(__CYGWIN__)
     #if defined(OPEN_SHACC_BUILD_SHARED)
@@ -42,10 +34,6 @@ extern "C" {
     #endif
 #endif
 
-/* -------------------------------------------------------------------------- */
-/* Status and Error Codes                                                     */
-/* -------------------------------------------------------------------------- */
-
 typedef enum OpenShaccErrorCode {
     OPEN_SHACC_SUCCESS                   =  0,
     OPEN_SHACC_ERROR_INVALID_ARGUMENT    = -1,
@@ -57,10 +45,6 @@ typedef enum OpenShaccErrorCode {
     OPEN_SHACC_ERROR_OUT_OF_MEMORY       = -7,
     OPEN_SHACC_ERROR_INTERNAL            = -99
 } OpenShaccErrorCode;
-
-/* -------------------------------------------------------------------------- */
-/* VitaSDK SceShaccCg Types & Enums                                           */
-/* -------------------------------------------------------------------------- */
 
 typedef enum SceShaccCgDiagnosticLevel {
     SCE_SHACCCG_DIAGNOSTIC_LEVEL_INFO    = 0,
@@ -226,10 +210,6 @@ typedef struct SceShaccCgCompileOutput {
 
 typedef const void* SceShaccCgParameter;
 
-/* -------------------------------------------------------------------------- */
-/* Standard SceShaccCg Library Functions (PS Vita ABI / NID Export Table)      */
-/* -------------------------------------------------------------------------- */
-
 OPEN_SHACC_API int sceShaccCgInitializeCompileOptions(SceShaccCgCompileOptions *options);
 OPEN_SHACC_API SceShaccCgCompileOutput const *sceShaccCgCompileProgram(
     const SceShaccCgCompileOptions *options,
@@ -243,7 +223,6 @@ OPEN_SHACC_API void sceShaccCgReleaseCompiler(void);
 OPEN_SHACC_API const char *sceShaccCgGetVersionString(void);
 OPEN_SHACC_API int sceShaccCgExtEnableExtensions(void);
 
-/* Parameter Reflection APIs */
 OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetFirstParameter(const SceShaccCgCompileOutput *output);
 OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetNextParameter(SceShaccCgParameter parameter);
 OPEN_SHACC_API SceShaccCgParameter sceShaccCgGetParameterByName(const SceShaccCgCompileOutput *output, const char *name);
@@ -270,10 +249,6 @@ OPEN_SHACC_API int sceShaccCgIsParameterRegFormat(SceShaccCgParameter parameter)
 OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecision(SceShaccCgParameter parameter);
 OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatPrecisionCount(SceShaccCgParameter parameter);
 OPEN_SHACC_API uint32_t sceShaccCgGetSamplerQueryFormatWidth(SceShaccCgParameter parameter);
-
-/* -------------------------------------------------------------------------- */
-/* Public Open-Shacc Wrapper C API Functions                                  */
-/* -------------------------------------------------------------------------- */
 
 enum OpenShaccCompileFlags {
     OPEN_SHACC_OPT_NONE                  = 0x0000,

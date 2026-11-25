@@ -1,8 +1,6 @@
 /**
  * @file parser.cpp
  * @brief Clean-room Cg/HLSL AST parser implementation.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "parser.hpp"
@@ -296,7 +294,40 @@ void Parser::parse_top_level_declaration(TranslationUnit& tu) {
         return;
     }
 
-    if (check(TokenType::KwStruct)) {
+    if (check(TokenType::Identifier) && peek().text == "cbuffer" && peek_next().type == TokenType::Identifier) {
+        advance(); // cbuffer
+        std::string block_name = advance().text;
+        std::string block_sem = parse_optional_semantic();
+        consume(TokenType::OpenBrace, "Expected '{' to begin cbuffer body");
+        StructDecl sdecl;
+        sdecl.name = block_name;
+        while (!check(TokenType::CloseBrace) && !is_at_end()) {
+            while (match(TokenType::KwConst)) {}
+            DataType field_type = parse_type();
+            do {
+                if (!check(TokenType::Identifier)) {
+                    error(peek(), "Expected field name in cbuffer");
+                    break;
+                }
+                std::string field_name = advance().text;
+                DataType this_type = field_type;
+                if (match(TokenType::OpenBracket)) {
+                    this_type.array_size = parse_array_dimension();
+                }
+                std::string fsem = parse_optional_semantic();
+                sdecl.fields.push_back(StructField{this_type, field_name, fsem});
+            } while (match(TokenType::Comma));
+            consume(TokenType::Semicolon, "Expected ';' after cbuffer field declaration");
+        }
+        consume(TokenType::CloseBrace, "Expected '}' after cbuffer body");
+        match(TokenType::Semicolon);
+        tu.structs.push_back(std::move(sdecl));
+        DataType btype;
+        btype.base = BaseType::UniformBlock;
+        btype.struct_name = block_name;
+        btype.array_size = 1;
+        tu.uniforms.push_back(UniformDecl{btype, block_name, block_sem, 0});
+    } else if (check(TokenType::KwStruct)) {
         parse_struct_declaration(tu);
     } else if (check(TokenType::KwUniform)) {
         parse_uniform_or_global(tu);

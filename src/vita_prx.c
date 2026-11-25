@@ -3,8 +3,6 @@
  * @brief PlayStation Vita PRX module entry points and runtime symbols.
  *
  * Compiled as pure C to avoid C++ linkage conflicts with libstdc++.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #if defined(__vita__) || defined(__psp2__)
@@ -34,7 +32,8 @@ __attribute__((weak)) extern init_fn_t __fini_array_start[];
 __attribute__((weak)) extern init_fn_t __fini_array_end[];
 
 /* Provided for C++ runtime destructors when linking with -nostartfiles */
-__attribute__((visibility("hidden"))) void* __dso_handle = &__dso_handle;
+__attribute__((visibility("hidden"), used)) void* __dso_handle = &__dso_handle;
+__attribute__((weak)) extern void __cxa_finalize(void *dso_handle);
 
 static int g_prx_initialized = 0;
 
@@ -78,7 +77,7 @@ void _free_vita_newlib(void) {
 }
 
 /* Module lifecycle hooks defined in module.yml */
-__attribute__((visibility("default"))) int module_start(size_t argc, const void* args) {
+__attribute__((visibility("default"), used)) int module_start(size_t argc, const void* args) {
     (void)argc;
     (void)args;
 
@@ -102,11 +101,14 @@ __attribute__((visibility("default"))) int module_start(size_t argc, const void*
     return 0; /* SCE_KERNEL_START_SUCCESS */
 }
 
-__attribute__((visibility("default"))) int module_stop(size_t argc, const void* args) {
+__attribute__((visibility("default"), used)) int module_stop(size_t argc, const void* args) {
     (void)argc;
     (void)args;
 
     if (g_prx_initialized) {
+        if (&__cxa_finalize != NULL) {
+            __cxa_finalize(&__dso_handle);
+        }
         run_fini_arrays();
         _free_vita_newlib();
     }

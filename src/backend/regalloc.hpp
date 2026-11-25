@@ -1,8 +1,6 @@
 /**
  * @file regalloc.hpp
  * @brief USSE Register Allocator with even-aligned vec4 temp pooling and GXM canonical layout.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_REGALLOC_HPP
@@ -50,16 +48,23 @@ public:
     // POSITION(+4) -> COLOR0(+4) -> COLOR1(+4) -> FOG(+2) -> TEXCOORD0..9(+2/+3/+4) -> PSIZE(+1) -> CLIP0..7(+1)
     void finalize_canonical_vertex_outputs();
 
+    // Assign deterministic non-colliding hardware TEXCOORD/COLOR/FOG iterators for fragment varyings
+    // while preserving explicit declared semantics (e.g. NORMAL, TANGENT, DIFFUSE, SPECULAR)
+    void finalize_fragment_varyings();
+
     // Register an alias without allocating a duplicate input/output
     void alias_symbol(const std::string& alias_name, const SymbolBinding& binding);
     void erase_symbol(const std::string& name);
 
-    // Scoped temporary vec4 slot allocation (4-word aligned, up to r116, safely below FPINTERNAL r120)
+    // Scoped temporary allocation (2-word even pairs or 4-word vec4 slots, up to r119, safely below FPINTERNAL r120)
     HardwareRegister allocate_temporary(uint8_t sub_index = 0);
     std::vector<HardwareRegister> allocate_temporary_vector(uint8_t component_count);
+    uint8_t allocate_temp_pair();
     uint8_t allocate_temp_vec4();
     uint8_t allocate_contiguous_temp_vec4s(uint8_t vec4_count);
+    void free_temp_pair(uint8_t base_reg);
     void free_temp_vec4(uint8_t base_reg);
+    void free_temp_pairs(uint8_t base_reg, uint8_t pair_count);
     void free_temporary(uint8_t reg_index);
 
     // Lookup
@@ -74,15 +79,19 @@ public:
     [[nodiscard]] uint16_t get_constant_count() const { return next_constant_; }
     [[nodiscard]] uint8_t get_sampler_count() const { return next_sampler_; }
     [[nodiscard]] bool has_temp_overflow() const { return temp_overflow_; }
-    [[nodiscard]] uint16_t get_sampler_sa_base() const { return static_cast<uint16_t>((next_constant_ + 3u) & ~3u); }
+    [[nodiscard]] uint16_t get_sampler_sa_base() const { return 0u; }
     [[nodiscard]] uint16_t get_sampler_sa_offset(uint16_t sampler_unit) const {
-        return static_cast<uint16_t>(get_sampler_sa_base() + sampler_unit * 4u);
+        return static_cast<uint16_t>(sampler_unit * 4u);
+    }
+    [[nodiscard]] uint16_t get_uniform_sa_base() const {
+        return static_cast<uint16_t>(next_sampler_ * 4u);
     }
 
 private:
+    static constexpr uint8_t kMaxTempPairs = 60; // 60 * 2 = 120 F32 scalar temporaries (r0..r119)
+    uint8_t allocate_temp_pairs(uint8_t pair_count);
     std::string assign_fragment_hw_semantic(const std::string& requested_sem);
 
-    uint8_t next_temporary_ = 0;
     uint8_t peak_temporary_ = 0;
     uint16_t next_constant_ = 0;
     uint8_t next_input_ = 0;
@@ -91,7 +100,7 @@ private:
     uint32_t used_frag_texcoords_ = 0;
     bool temp_overflow_ = false;
 
-    std::vector<uint8_t> free_vec4_slots_;
+    bool temp_pairs_used_[kMaxTempPairs]{};
     std::unordered_map<std::string, SymbolBinding> symbol_table_;
     std::vector<SymbolBinding> uniforms_;
     std::vector<SymbolBinding> samplers_;

@@ -3,8 +3,6 @@
  * @brief Abstract Syntax Tree structures for Cg / HLSL shader front-end.
  *
  * Clean-room implementation based on standard NVIDIA Cg language specification.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_AST_HPP
@@ -391,6 +389,7 @@ struct ParameterDecl {
     bool is_in = true;
     bool is_out = false;
     bool is_uniform = false;
+    bool is_native_color = false;
 };
 
 struct FunctionDecl {

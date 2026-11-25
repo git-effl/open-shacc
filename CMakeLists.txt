@@ -145,15 +145,32 @@ endif()
 # PlayStation Vita SUPRX Plugin Target
 # -----------------------------------------------------------------------------
 if(IS_VITA_BUILD)
+    if(DEFINED VITASDK AND EXISTS "${VITASDK}/share/vita.cmake")
+        include("${VITASDK}/share/vita.cmake")
+    elseif(DEFINED ENV{VITASDK} AND EXISTS "$ENV{VITASDK}/share/vita.cmake")
+        include("$ENV{VITASDK}/share/vita.cmake")
+    endif()
+
     add_executable(open-shacc-elf ${OPEN_SHACC_SOURCES} ${OPEN_SHACC_HEADERS} src/vita_prx.c)
     target_compile_definitions(open-shacc-elf PRIVATE OPEN_SHACC_BUILD_SUPRX)
+    target_compile_options(open-shacc-elf PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>)
     target_include_directories(open-shacc-elf
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    target_link_libraries(open-shacc-elf PRIVATE
+        SceLibKernel_stub
+        SceSysmem_stub
+        SceKernelThreadMgr_stub
+        SceIofilemgr_stub
+        SceProcessmgr_stub
+        SceRtc_stub
+        m
+    )
     # Modules do not have a main() function; entry point is module_start.
     # -nostartfiles prevents linking crt0.o and avoids undefined reference to main.
-    # -Wl,--export-dynamic ensures all default-visibility symbols are kept in .dynsym for vita-elf-create.
+    # -Wl,-q retains relocations required by vita-elf-create.
+    # -Wl,--export-dynamic ensures default-visibility symbols are kept for vita-elf-create.
     set_target_properties(open-shacc-elf PROPERTIES
         LINK_FLAGS "-nostartfiles -Wl,-q -Wl,--export-dynamic"
     )
@@ -162,8 +179,9 @@ if(IS_VITA_BUILD)
         vita_create_self(open-shacc.suprx open-shacc-elf CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/module.yml)
     else()
         add_custom_command(TARGET open-shacc-elf POST_BUILD
-            COMMAND vita-elf-create open-shacc-elf open-shacc.velf -e ${CMAKE_CURRENT_SOURCE_DIR}/module.yml
-            COMMAND vita-make-fself -s open-shacc.velf open-shacc.suprx
+            COMMAND vita-elf-create $<TARGET_FILE:open-shacc-elf> ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.velf -e ${CMAKE_CURRENT_SOURCE_DIR}/module.yml
+            COMMAND vita-make-fself -s ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.velf ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.suprx
+            BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.velf ${CMAKE_CURRENT_BINARY_DIR}/open-shacc.suprx
             COMMENT "Building open-shacc.suprx plugin"
         )
     endif()

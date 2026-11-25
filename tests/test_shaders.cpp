@@ -1,8 +1,6 @@
 /**
  * @file test_shaders.cpp
  * @brief Clean-room automated test suite for open-shacc compiler library.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "open_shacc.h"
@@ -231,7 +229,7 @@ void test_sceshacccg_abi_and_reflection() {
     TEST_ASSERT(output->programData != nullptr, "programData must not be null");
     TEST_ASSERT(output->programSize >= 0x9C, "programSize must fit SceGxmProgram");
     TEST_ASSERT((read_u32(output->programData, 0x14) & 1u) == 1u, "Fragment shader flag bit 0 must be set");
-    TEST_ASSERT((read_u32(output->programData, 0x14) & (1u << 6)) != 0u, "Fragment NATIVECOLOR_USED flag must be set");
+    TEST_ASSERT((read_u32(output->programData, 0x14) & (1u << 6)) == 0u, "Ordinary COLOR output shader must NOT set NATIVECOLOR_USED");
     TEST_ASSERT(read_u32(output->programData, 0x80) == 1u, "Should emit 1 dependent sampler entry");
     TEST_ASSERT(read_u32(output->programData, 0x90) == 2u, "Should emit container 14 + container 19");
 
@@ -884,6 +882,373 @@ void test_vitagl_real_world_ffp_and_glsl_translator() {
     std::cout << "  [PASS] test_vitagl_real_world_ffp_and_glsl_translator\n";
 }
 
+void test_gxp_uniform_stride_nativecolor_and_sampler_sa() {
+    // 1. Tight uniform packing: float3x3 (9 words, row_stride=3), float[3] (3), float2[2] (4), float3[2] (6)
+    const char* stride_src = R"(
+        uniform float3x3 u_NormalMat;
+        uniform float    u_Weights[3];
+        uniform float2   u_Offsets[2];
+        uniform float3   u_Colors[2];
+
+        float4 main(float3 n : NORMAL, float4 p : POSITION) : POSITION {
+            float3 tn = mul(u_NormalMat, n);
+            float w = u_Weights[0] + u_Weights[2];
+            float2 off = u_Offsets[1];
+            float3 col = u_Colors[1];
+            return float4(tn + col, w + off.x + p.w);
+        }
+    )";
+    SceShaccCgCompileOptions s_opts;
+    sceShaccCgInitializeCompileOptions(&s_opts);
+    s_opts.mainSourceFile = stride_src;
+    s_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+    const SceShaccCgCompileOutput* s_out = sceShaccCgCompileProgram(&s_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(s_out, "Tight uniform stride shader must compile");
+
+    SceShaccCgParameter p_mat = sceShaccCgGetParameterByName(s_out, "u_NormalMat");
+    TEST_ASSERT(p_mat != nullptr, "u_NormalMat must be reflected");
+    TEST_ASSERT(sceShaccCgGetParameterColumns(p_mat) == 3u && sceShaccCgGetParameterRows(p_mat) == 3u, "u_NormalMat 3x3");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetRowParameter(p_mat, 0)) == 0u, "float3x3 row 0 at UB+0");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetRowParameter(p_mat, 1)) == 3u, "float3x3 row 1 at UB+3");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetRowParameter(p_mat, 2)) == 6u, "float3x3 row 2 at UB+6");
+
+    SceShaccCgParameter p_w = sceShaccCgGetParameterByName(s_out, "u_Weights");
+    TEST_ASSERT(p_w != nullptr && sceShaccCgGetArraySize(p_w) == 3u, "u_Weights[3] reflected");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_w, 0)) == 9u, "float[3] elem 0 at UB+9");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_w, 1)) == 10u, "float[3] elem 1 at UB+10");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_w, 2)) == 11u, "float[3] elem 2 at UB+11");
+
+    SceShaccCgParameter p_off = sceShaccCgGetParameterByName(s_out, "u_Offsets");
+    TEST_ASSERT(p_off != nullptr && sceShaccCgGetArraySize(p_off) == 2u, "u_Offsets[2] reflected");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_off, 0)) == 12u, "float2[2] elem 0 at UB+12");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_off, 1)) == 14u, "float2[2] elem 1 at UB+14");
+
+    SceShaccCgParameter p_col = sceShaccCgGetParameterByName(s_out, "u_Colors");
+    TEST_ASSERT(p_col != nullptr && sceShaccCgGetArraySize(p_col) == 2u, "u_Colors[2] reflected");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_col, 0)) == 16u, "float3[2] elem 0 at UB+16");
+    TEST_ASSERT(sceShaccCgGetParameterResourceIndex(sceShaccCgGetArrayParameter(p_col, 1)) == 19u, "float3[2] elem 1 at UB+19");
+    TEST_ASSERT(read_u32(s_out->programData, 0x64) == 22u, "Tight UB count must be 9 + 3 + 4 + 6 = 22 words");
+    sceShaccCgDestroyCompileOutput(s_out);
+
+    // 2. Conditional NATIVECOLOR_USED when reading native framebuffer color
+    const char* nc_src = R"(
+        uniform float4 u_SrcColor;
+        void main(inout float4 io_Col : COLOR) {
+            io_Col = lerp(io_Col, u_SrcColor, u_SrcColor.a);
+        }
+    )";
+    SceShaccCgCompileOptions nc_opts;
+    sceShaccCgInitializeCompileOptions(&nc_opts);
+    nc_opts.mainSourceFile = nc_src;
+    nc_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* nc_out = sceShaccCgCompileProgram(&nc_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(nc_out, "Programmable blend inout COLOR shader must compile");
+    TEST_ASSERT((read_u32(nc_out->programData, 0x14) & (1u << 6)) != 0u, "inout COLOR shader must set NATIVECOLOR_USED");
+    sceShaccCgDestroyCompileOutput(nc_out);
+
+    // 3. Sampler placed at sa0 even with > 260 uniform F32 words (no 7-bit SMP SA truncation!)
+    const char* big_sa_src = R"(
+        uniform float4 u_BigPalette[70];
+        uniform sampler2D u_Tex;
+        float4 main(float2 uv : TEXCOORD0) : COLOR {
+            return tex2D(u_Tex, uv) * u_BigPalette[69];
+        }
+    )";
+    SceShaccCgCompileOptions big_opts;
+    sceShaccCgInitializeCompileOptions(&big_opts);
+    big_opts.mainSourceFile = big_sa_src;
+    big_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* big_out = sceShaccCgCompileProgram(&big_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(big_out, "High uniform + sampler shader must compile");
+
+    const uint8_t* bytes = big_out->programData;
+    TEST_ASSERT(read_u32(bytes, 0x64) == 280u, "Default UB must be 280 F32 words");
+    TEST_ASSERT(read_u16(bytes, 0x32) == 284u, "Total SA regs must be 4 (sampler) + 280 (UB) = 284");
+
+    const uint32_t cont_count = read_u32(bytes, 0x90);
+    const size_t cont_abs = 0x94 + static_cast<size_t>(read_i32(bytes, 0x94));
+    TEST_ASSERT(cont_count == 2u, "Must have containers 14 and 19");
+    uint16_t cont14_base = 0xFFFFu;
+    uint16_t cont19_base = 0xFFFFu;
+    for (uint32_t i = 0; i < cont_count; ++i) {
+        uint16_t idx = read_u16(bytes, cont_abs + i * 8u);
+        uint16_t base_sa = read_u16(bytes, cont_abs + i * 8u + 4u);
+        if (idx == 14u) cont14_base = base_sa;
+        if (idx == 19u) cont19_base = base_sa;
+    }
+    TEST_ASSERT(cont19_base == 0u, "Container 19 (sampler) base_sa_offset must be sa0");
+    TEST_ASSERT(cont14_base == 4u, "Container 14 (default UB) base_sa_offset must be sa4");
+
+    // Verify SMP instruction actually encodes sa0 (bits 13:7 == 0)
+    const uint32_t instr_count = read_u32(bytes, 0x3C);
+    const size_t ucode_abs = 0x40 + static_cast<size_t>(read_i32(bytes, 0x40));
+    bool saw_smp_sa0 = false;
+    for (uint32_t i = 0; i < instr_count; ++i) {
+        uint64_t w = read_u64(bytes, ucode_abs + i * sizeof(uint64_t));
+        if ((w >> 59) == 0b11100ULL) {
+            TEST_ASSERT(((w >> 7) & 0x7FULL) == 0ULL, "SMP must encode sampler SA offset 0 (sa0)");
+            saw_smp_sa0 = true;
+        }
+    }
+    TEST_ASSERT(saw_smp_sa0, "Must emit SMP instruction at sa0");
+    sceShaccCgDestroyCompileOutput(big_out);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_gxp_uniform_stride_nativecolor_and_sampler_sa\n";
+}
+
+void test_dynamic_bitwise_varying_linkage_preprocessor_and_reflection() {
+    // 1. Dynamic runtime bitwise/shift ops (<<, >>, &, |, ^, ~)
+    const char* bit_src = R"(
+        #define APPLY_MIX(fn, ...) fn(__VA_ARGS__)
+
+        float4 main(float4 v : COLOR0, float s : TEXCOORD0) : COLOR {
+            int a = int(v.x * 255.0f);
+            int b = int(v.y * 255.0f);
+            int sh = int(s * 3.0f);
+            int dyn_shl = a << sh;
+            int dyn_shr = b >> sh;
+            int dyn_and = dyn_shl & b;
+            int dyn_or  = dyn_and | dyn_shr;
+            int dyn_xor = dyn_or ^ (~a);
+            float res = APPLY_MIX(saturate, float(dyn_xor) * 0.001f);
+            return float4(res, float(a & 15), float(b & 7), 1.0f);
+        }
+    )";
+    SceShaccCgCompileOptions bit_opts;
+    sceShaccCgInitializeCompileOptions(&bit_opts);
+    bit_opts.mainSourceFile = bit_src;
+    bit_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* bit_out = sceShaccCgCompileProgram(&bit_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(bit_out, "Dynamic bitwise/shift + variadic macro shader must compile");
+
+    const uint8_t* bit_bytes = bit_out->programData;
+    const uint32_t bit_icount = read_u32(bit_bytes, 0x3C);
+    const size_t bit_ucode = 0x40 + static_cast<size_t>(read_i32(bit_bytes, 0x40));
+    bool saw_vfrc = false;
+    bool saw_vexp = false;
+    bool saw_br = false;
+    for (uint32_t i = 0; i < bit_icount; ++i) {
+        uint64_t w = read_u64(bit_bytes, bit_ucode + i * sizeof(uint64_t));
+        uint64_t op1 = (w >> 59);
+        if (op1 == 0b00110ULL) {
+            uint64_t op2 = (w >> 41) & 0x3ULL;
+            if (op2 == 3ULL) saw_vexp = true;
+        }
+        if (op1 == 0b00001ULL) {
+            uint64_t op2 = (w >> 12) & 0x7ULL;
+            if (op2 == 2ULL) saw_vfrc = true;
+        }
+        if (op1 == 0b11111ULL && ((w >> 52) & 3ULL) == 0ULL && ((w >> 38) & 1ULL) == 1ULL) {
+            saw_br = true;
+        }
+    }
+    TEST_ASSERT(saw_vexp, "Dynamic shift must emit VEXP instruction");
+    TEST_ASSERT(saw_vfrc, "Dynamic bitwise & / | / ^ must emit VFRC LSB extraction");
+    TEST_ASSERT(saw_br, "Dynamic bitwise loop must emit BR loop instruction");
+    sceShaccCgDestroyCompileOutput(bit_out);
+
+    // 2. Varying linkage: preserve explicit NORMAL/TANGENT/DIFFUSE semantics & assign non-colliding canonical slots
+    const char* vp_link = R"(
+        uniform float4x4 u_MVP;
+        struct VS_OUT {
+            float3 tangent : TANGENT;
+            float2 uv0     : TEXCOORD0;
+            float4 diff    : DIFFUSE;
+            float3 normal  : NORMAL;
+            float4 pos     : POSITION;
+        };
+        VS_OUT main(float4 p : POSITION, float3 n : NORMAL, float3 t : TANGENT, float2 uv : TEXCOORD0) {
+            VS_OUT o;
+            o.pos = mul(u_MVP, p);
+            o.normal = n;
+            o.tangent = t;
+            o.uv0 = uv;
+            o.diff = float4(1.0f, 1.0f, 1.0f, 1.0f);
+            return o;
+        }
+    )";
+    SceShaccCgCompileOptions vpl_opts;
+    sceShaccCgInitializeCompileOptions(&vpl_opts);
+    vpl_opts.mainSourceFile = vp_link;
+    vpl_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+    const SceShaccCgCompileOutput* vpl_out = sceShaccCgCompileProgram(&vpl_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(vpl_out, "VP with NORMAL/TANGENT/DIFFUSE/TEXCOORD0 must compile");
+
+    SceShaccCgParameter p_vnorm = sceShaccCgGetParameterByName(vpl_out, "normal");
+    SceShaccCgParameter p_vtang = sceShaccCgGetParameterByName(vpl_out, "tangent");
+    SceShaccCgParameter p_vdiff = sceShaccCgGetParameterByName(vpl_out, "diff");
+    TEST_ASSERT(p_vnorm && std::string(sceShaccCgGetParameterSemantic(p_vnorm)) == "NORMAL", "VP must preserve NORMAL semantic");
+    TEST_ASSERT(p_vtang && std::string(sceShaccCgGetParameterSemantic(p_vtang)) == "TANGENT", "VP must preserve TANGENT semantic");
+    TEST_ASSERT(p_vdiff && std::string(sceShaccCgGetParameterSemantic(p_vdiff)) == "DIFFUSE", "VP must preserve DIFFUSE semantic");
+    const uint32_t vp_vout1 = read_u32(vpl_out->programData, 0x9C + 0x10);
+    const uint32_t vp_vout2 = read_u32(vpl_out->programData, 0x9C + 0x14);
+    TEST_ASSERT((vp_vout1 & (1u << 11)) != 0u, "DIFFUSE must map to COLOR0 bit in vertex_outputs1");
+    TEST_ASSERT((vp_vout2 & 0x7u) == 1u, "Explicit TEXCOORD0 float2 stays at slot 0");
+    TEST_ASSERT(((vp_vout2 >> 3) & 0x7u) == 3u, "NORMAL float3 assigns canonical TEXCOORD1 slot 1");
+    TEST_ASSERT(((vp_vout2 >> 6) & 0x7u) == 3u, "TANGENT float3 assigns canonical TEXCOORD2 slot 2");
+    sceShaccCgDestroyCompileOutput(vpl_out);
+
+    // Fragment shader declaring same varyings in reversed order
+    const char* fp_link = R"(
+        float4 main(
+            float3 norm : NORMAL,
+            float4 diff : DIFFUSE,
+            float3 tang : TANGENT,
+            float2 uv0  : TEXCOORD0
+        ) : COLOR {
+            return float4(normalize(norm + tang) * uv0.x, 1.0f) * diff;
+        }
+    )";
+    SceShaccCgCompileOptions fpl_opts;
+    sceShaccCgInitializeCompileOptions(&fpl_opts);
+    fpl_opts.mainSourceFile = fp_link;
+    fpl_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* fpl_out = sceShaccCgCompileProgram(&fpl_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(fpl_out, "FP with NORMAL/DIFFUSE/TANGENT/TEXCOORD0 must compile");
+
+    SceShaccCgParameter p_fnorm = sceShaccCgGetParameterByName(fpl_out, "norm");
+    TEST_ASSERT(p_fnorm && std::string(sceShaccCgGetParameterSemantic(p_fnorm)) == "NORMAL", "FP must preserve NORMAL semantic");
+    TEST_ASSERT(read_u16(fpl_out->programData, 0x9C + 0x0C) == 4u, "FP must have 4 varyings");
+    // Check iterator encodings: bits 15:12 encode 0..9=TEXCOORD0..9, 0xA=COLOR0
+    // [0]=NORMAL->TEXCOORD1 (0x1), [1]=DIFFUSE->COLOR0 (0xA), [2]=TANGENT->TEXCOORD2 (0x2), [3]=TEXCOORD0 (0x0)
+    auto read_it_id = [&](uint32_t k) -> uint32_t {
+        uint32_t info = read_u32(fpl_out->programData, 0xBC + k * 16u);
+        return (info >> 12) & 0xFu;
+    };
+    TEST_ASSERT(read_it_id(0) == 0x1u, "FP NORMAL must map to hw TEXCOORD1 (0x1) matching VP");
+    TEST_ASSERT(read_it_id(1) == 0xAu, "FP DIFFUSE must map to hw COLOR0 (0xA) matching VP");
+    TEST_ASSERT(read_it_id(2) == 0x2u, "FP TANGENT must map to hw TEXCOORD2 (0x2) matching VP");
+    TEST_ASSERT(read_it_id(3) == 0x0u, "FP TEXCOORD0 must stay on hw TEXCOORD0 (0x0) matching VP");
+    sceShaccCgDestroyCompileOutput(fpl_out);
+
+    // 3. Preprocessor error propagation (#error, missing #include, unterminated #if)
+    auto expect_prep_fail = [&](const char* bad_prep_src, const char* label) -> bool {
+        SceShaccCgCompileOptions o;
+        sceShaccCgInitializeCompileOptions(&o);
+        o.mainSourceFile = bad_prep_src;
+        o.targetProfile = SCE_SHACCCG_PROFILE_FP;
+        const SceShaccCgCompileOutput* res = sceShaccCgCompileProgram(&o, nullptr, 0);
+        bool ok = (res != nullptr && res->programData == nullptr && res->diagnosticCount > 0);
+        if (res) sceShaccCgDestroyCompileOutput(res);
+
+        void* bin = nullptr;
+        size_t sz = 0;
+        char* log = nullptr;
+        int rc = SceShaccCgCompileProgram(bad_prep_src, 0, nullptr, &bin, &sz, &log);
+        if (rc == OPEN_SHACC_SUCCESS || log == nullptr) ok = false;
+        if (log) SceShaccCgDestroyDiagnosticLog(log);
+        if (bin) SceShaccCgDestroyProgram(bin);
+        if (!ok) {
+            std::cerr << "  [FAIL] Preprocessor failure expected for " << label << "\n";
+        }
+        return ok;
+    };
+    TEST_ASSERT(expect_prep_fail("#error unsupported target\nfloat4 main() : COLOR { return float4(1,0,0,1); }", "#error"), "#error must fail compilation");
+    TEST_ASSERT(expect_prep_fail("#include \"nonexistent_header.h\"\nfloat4 main() : COLOR { return float4(1,0,0,1); }", "#include"), "Missing #include must fail compilation");
+    TEST_ASSERT(expect_prep_fail("#if 1\nfloat4 main() : COLOR { return float4(1,0,0,1); }", "unclosed #if"), "Unclosed #if must fail compilation");
+
+    // 4. Reflection: struct user type, cbuffer uniform block members, and sampler query format
+    const char* refl_src = R"(
+        struct Material {
+            float4 albedo;
+            float  roughness;
+        };
+        cbuffer PerFrame {
+            float4x4 u_ViewProj;
+            float    u_Time;
+        };
+        uniform Material u_Mat;
+        uniform sampler2D u_AlbedoTex;
+
+        float4 main(float2 uv : TEXCOORD0, float4 p : POSITION) : COLOR {
+            float4 c = tex2D(u_AlbedoTex, uv);
+            float4 proj = mul(u_ViewProj, p);
+            return c * u_Mat.albedo * saturate(u_Mat.roughness + u_Time + proj.x);
+        }
+    )";
+    SceShaccCgCompileOptions refl_opts;
+    sceShaccCgInitializeCompileOptions(&refl_opts);
+    refl_opts.mainSourceFile = refl_src;
+    refl_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* refl_out = sceShaccCgCompileProgram(&refl_opts, nullptr, 0);
+    TEST_ASSERT_COMPILED(refl_out, "Struct + cbuffer + sampler reflection shader must compile");
+
+    SceShaccCgParameter p_mat = sceShaccCgGetParameterByName(refl_out, "u_Mat");
+    TEST_ASSERT(p_mat != nullptr, "Struct uniform u_Mat must be reflected");
+    TEST_ASSERT(sceShaccCgGetParameterClass(p_mat) == SCE_SHACCCG_PARAMETERCLASS_STRUCT, "u_Mat class must be STRUCT");
+    TEST_ASSERT(std::string(sceShaccCgGetParameterUserType(p_mat)) == "Material", "GetParameterUserType(u_Mat) must return Material");
+    SceShaccCgParameter f0 = sceShaccCgGetFirstStructParameter(p_mat);
+    TEST_ASSERT(f0 != nullptr && std::string(sceShaccCgGetParameterName(f0)) == "albedo", "First struct field must be albedo");
+    SceShaccCgParameter f1 = sceShaccCgGetNextParameter(f0);
+    TEST_ASSERT(f1 != nullptr && std::string(sceShaccCgGetParameterName(f1)) == "roughness", "Second struct field must be roughness");
+
+    SceShaccCgParameter p_blk = sceShaccCgGetParameterByName(refl_out, "PerFrame");
+    TEST_ASSERT(p_blk != nullptr, "cbuffer PerFrame must be reflected");
+    TEST_ASSERT(sceShaccCgGetParameterClass(p_blk) == SCE_SHACCCG_PARAMETERCLASS_UNIFORMBLOCK, "PerFrame class must be UNIFORMBLOCK");
+    TEST_ASSERT(std::string(sceShaccCgGetParameterUserType(p_blk)) == "PerFrame", "GetParameterUserType(PerFrame) must return PerFrame");
+    SceShaccCgParameter b0 = sceShaccCgGetFirstUniformBlockParameter(p_blk);
+    TEST_ASSERT(b0 != nullptr && std::string(sceShaccCgGetParameterName(b0)) == "u_ViewProj", "First UB member must be u_ViewProj");
+    SceShaccCgParameter b1 = sceShaccCgGetNextParameter(b0);
+    TEST_ASSERT(b1 != nullptr && std::string(sceShaccCgGetParameterName(b1)) == "u_Time", "Second UB member must be u_Time");
+
+    SceShaccCgParameter p_ts = sceShaccCgGetParameterByName(refl_out, "u_AlbedoTex");
+    TEST_ASSERT(p_ts != nullptr, "u_AlbedoTex must be reflected");
+    TEST_ASSERT(sceShaccCgGetSamplerQueryFormatPrecision(p_ts) == SCE_SHACCCG_BASETYPE_FLOAT, "Sampler format precision must be FLOAT");
+    TEST_ASSERT(sceShaccCgGetSamplerQueryFormatPrecisionCount(p_ts) == 1u, "Sampler format precision count must be 1");
+    TEST_ASSERT(sceShaccCgGetSamplerQueryFormatWidth(p_ts) == 4u, "Sampler query width must be 4");
+
+    sceShaccCgDestroyCompileOutput(refl_out);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_dynamic_bitwise_varying_linkage_preprocessor_and_reflection\n";
+}
+
+static SceShaccCgSourceFile* nul_padded_open_cb(
+    const char* fileName,
+    const SceShaccCgSourceLocation*,
+    const SceShaccCgCompileOptions*,
+    const char**
+) {
+    static const char kSrcWithTrailingNul[] = "float4 main(float2 uv : TEXCOORD0) : COLOR { return float4(uv, 0.0f, 1.0f); }\0";
+    static SceShaccCgSourceFile f{};
+    f.fileName = fileName;
+    f.text = kSrcWithTrailingNul;
+    f.size = static_cast<uint32_t>(sizeof(kSrcWithTrailingNul)); // includes trailing NUL
+    return &f;
+}
+
+void test_callback_system_files_and_nul_buffer() {
+    SceShaccCgCallbackList sys_cb;
+    sceShaccCgInitializeCallbackList(&sys_cb, SCE_SHACCCG_SYSTEM_FILES);
+    TEST_ASSERT(sys_cb.openFile != nullptr && sys_cb.releaseFile != nullptr, "SYSTEM_FILES must populate openFile/releaseFile");
+    TEST_ASSERT(sys_cb.locateFile != nullptr && sys_cb.releaseFileName != nullptr, "SYSTEM_FILES must populate locateFile/releaseFileName");
+
+    SceShaccCgCompileOptions sys_opts;
+    sceShaccCgInitializeCompileOptions(&sys_opts);
+    sys_opts.mainSourceFile = "samples/basic_mvp.cg";
+    sys_opts.targetProfile = SCE_SHACCCG_PROFILE_VP;
+    const SceShaccCgCompileOutput* sys_out = sceShaccCgCompileProgram(&sys_opts, &sys_cb, 0);
+    TEST_ASSERT_COMPILED(sys_out, "SYSTEM_FILES callback must load and compile samples/basic_mvp.cg");
+    sceShaccCgDestroyCompileOutput(sys_out);
+
+    SceShaccCgCallbackList nul_cb;
+    sceShaccCgInitializeCallbackList(&nul_cb, SCE_SHACCCG_TRIVIAL);
+    TEST_ASSERT(nul_cb.openFile == nullptr, "TRIVIAL callback list must leave openFile null");
+    nul_cb.openFile = &nul_padded_open_cb;
+
+    SceShaccCgCompileOptions nul_opts;
+    sceShaccCgInitializeCompileOptions(&nul_opts);
+    nul_opts.mainSourceFile = "inline_nul.cg";
+    nul_opts.targetProfile = SCE_SHACCCG_PROFILE_FP;
+    const SceShaccCgCompileOutput* nul_out = sceShaccCgCompileProgram(&nul_opts, &nul_cb, 0);
+    TEST_ASSERT_COMPILED(nul_out, "openFile buffer with trailing NUL counted in size must compile cleanly");
+    sceShaccCgDestroyCompileOutput(nul_out);
+
+    g_tests_passed++;
+    std::cout << "  [PASS] test_callback_system_files_and_nul_buffer\n";
+}
+
 int main() {
     std::cout << "Running open-shacc Clean-Room Test Suite...\n";
     test_version();
@@ -899,6 +1264,9 @@ int main() {
     test_gxp_vertex_varyings_and_frag_formats();
     test_high_sa_smbo_and_dynamic_array_write();
     test_vitagl_real_world_ffp_and_glsl_translator();
+    test_gxp_uniform_stride_nativecolor_and_sampler_sa();
+    test_dynamic_bitwise_varying_linkage_preprocessor_and_reflection();
+    test_callback_system_files_and_nul_buffer();
     test_syntax_error_handling();
 
     std::cout << "\nTest Results: " << g_tests_passed << " passed, " << g_tests_failed << " failed.\n";

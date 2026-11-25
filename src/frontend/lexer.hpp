@@ -1,8 +1,6 @@
 /**
  * @file lexer.hpp
  * @brief Lexical analyzer for NVIDIA Cg and Microsoft HLSL shader syntax.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_LEXER_HPP
@@ -23,7 +21,7 @@ enum class TokenType {
 
     // Keywords
     KwStruct, KwUniform, KwConst, KwVarying, KwStatic, KwUnsigned, KwSigned,
-    KwIn, KwOut, KwInOut, KwInline,
+    KwIn, KwOut, KwInOut, KwInline, KwNativeColor,
     KwReturn, KwDiscard, KwIf, KwElse, KwFor, KwWhile, KwDo, KwBreak, KwContinue,
     KwVoid, KwBool, KwBool2, KwBool3, KwBool4,
     KwInt, KwInt2, KwInt3, KwInt4,

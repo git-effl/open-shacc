@@ -4,8 +4,6 @@
  *
  * Clean-room implementation based strictly on public PowerVR SGX / USSE
  * architecture specifications and standard Cg / HLSL language semantics.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_USSE_CODEGEN_HPP
@@ -34,9 +32,11 @@ struct CompiledProgram {
     uint16_t const_register_count = 0;
     uint8_t input_register_count = 0;
     uint16_t sampler_sa_base = 0;
+    uint16_t uniform_sa_base = 0;
     bool is_vertex_shader = true;
     bool uses_discard = false;
     bool uses_depth = false;
+    bool uses_nativecolor = false;
 };
 
 struct ValueRef {
@@ -102,6 +102,7 @@ private:
     void emit_phase_switch();
 
     // Constant & temporary management
+    uint8_t alloc_temp_regs(uint8_t count);
     uint8_t alloc_temp_vec4();
     ValueRef make_temp_vec4(uint8_t count = 4);
     HardwareRegister get_zero_hw_reg();
@@ -149,6 +150,8 @@ private:
     ValueRef emit_trunc(const ValueRef& x);
     ValueRef emit_sqrt(const ValueRef& x);
     ValueRef emit_pow(const ValueRef& x, const ValueRef& y);
+    ValueRef emit_shift(bool is_right, const ValueRef& lhs, const ValueRef& rhs, const std::string& comment = "");
+    ValueRef emit_bitwise_op(frontend::BinaryOp op, const ValueRef& lhs, const ValueRef& rhs, const std::string& comment = "");
     ValueRef emit_matrix_mul(const ValueRef& lhs, const ValueRef& rhs);
 
     // Symbol/lvalue resolution
@@ -220,7 +223,13 @@ private:
     bool is_fragment_ = false;
     bool uses_discard_ = false;
     bool uses_depth_ = false;
+    bool uses_nativecolor_ = false;
     std::optional<HardwareRegister> depth_src_reg_;
+    struct InOutBinding {
+        SymbolBinding temp_sym;
+        SymbolBinding out_sym;
+    };
+    std::vector<InOutBinding> inout_outputs_;
 
     // Lazy float literal constant cache (4 scalars packed per vec4 temp slot)
     bool has_zero_reg_ = false;
@@ -230,13 +239,18 @@ private:
     std::unordered_map<uint32_t, uint8_t> float_const_cache_;
 
     // Scope stack for block-local symbol restoration and temp cleanup
+    struct TempAlloc {
+        uint8_t reg = 0;
+        uint8_t pair_count = 2;
+    };
     struct ScopeFrame {
         std::vector<std::pair<std::string, std::optional<SymbolBinding>>> shadowed_symbols;
-        std::vector<uint8_t> owned_vec4_temps;
+        std::vector<TempAlloc> owned_temps;
     };
     std::vector<ScopeFrame> scopes_;
     void push_scope();
     void pop_scope();
+    void preserve_and_pop_scope(const ValueRef& keep_val);
     void bind_scoped_symbol(const std::string& name, const SymbolBinding& binding);
 
     std::vector<LoopContext> loop_stack_;

@@ -2,10 +2,8 @@
  * @file gxp_format.hpp
  * @brief Clean-room binary container specifications for SceGxmProgram (GXP) shader binaries.
  *
- * Implemented strictly from public open-source specifications (Vita3K / VitaSDK).
+ * Implemented strictly from public open-source specifications (VitaSDK).
  * Contains no proprietary code.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_GXP_FORMAT_HPP

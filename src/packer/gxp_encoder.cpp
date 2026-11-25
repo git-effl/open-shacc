@@ -1,8 +1,6 @@
 /**
  * @file gxp_encoder.cpp
  * @brief Implementation of SceGxmProgram (GXP) Binary Container Packer.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "gxp_encoder.hpp"
@@ -346,8 +344,9 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         uint32_t v_out2 = 0;
         uint32_t tc_pack = 0;
         for (const auto& out : program.outputs) {
+            const std::string& hw_sem = out.hw_semantic.empty() ? out.semantic : out.hw_semantic;
             uint8_t clip_idx = 0;
-            if (parse_clip_semantic(out.semantic, clip_idx)) {
+            if (parse_clip_semantic(hw_sem, clip_idx)) {
                 uint32_t count = (out.type.array_size > 1) ? out.type.array_size : 1u;
                 for (uint32_t c = 0; c < count && (clip_idx + c) < 8u; ++c) {
                     v_out1 |= (1u << (clip_idx + c));
@@ -355,9 +354,9 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
                 continue;
             }
             bool is_half_sem = false;
-            normalize_semantic_upper(out.semantic, &is_half_sem);
-            auto [sem, sem_idx] = parse_semantic(out.semantic);
-            if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse) {
+            normalize_semantic_upper(hw_sem, &is_half_sem);
+            auto [sem, sem_idx] = parse_semantic(hw_sem);
+            if (sem == GxpParameterSemantic::Color || sem == GxpParameterSemantic::Diffuse || sem == GxpParameterSemantic::Bcol) {
                 v_out1 |= (sem_idx == 1) ? GXP_VERTEX_OUTPUT_COLOR1 : GXP_VERTEX_OUTPUT_COLOR0;
             } else if (sem == GxpParameterSemantic::Specular) {
                 v_out1 |= GXP_VERTEX_OUTPUT_COLOR1;
@@ -425,7 +424,7 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         SceGxmProgramParameterContainer cont14{};
         cont14.container_index = 14;
         cont14.unk_02 = 0;
-        cont14.base_sa_offset = 0;
+        cont14.base_sa_offset = program.uniform_sa_base;
         cont14.size_in_f32 = static_cast<uint16_t>(std::min<uint32_t>(default_ub_count, 0xFFFFu));
         std::memcpy(out_bytes.data() + cont_cursor, &cont14, sizeof(cont14));
         cont_cursor += sizeof(cont14);
@@ -473,7 +472,9 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
 
     if (is_frag) {
         header.program_flags |= GXP_PROGRAM_FLAG_FRAGMENT;
-        header.program_flags |= GXP_PROGRAM_FLAG_NATIVECOLOR_USED; // Outputs write o0
+        if (program.uses_nativecolor) {
+            header.program_flags |= GXP_PROGRAM_FLAG_NATIVECOLOR_USED;
+        }
         if (program.uses_discard) {
             header.program_flags |= GXP_PROGRAM_FLAG_DISCARD_USED;
         }
@@ -498,9 +499,9 @@ bool GxpEncoder::encode(const backend::CompiledProgram& program, std::vector<uin
         }
     }
 
-    const uint16_t total_sa_regs = has_dep_samplers
-        ? static_cast<uint16_t>(program.sampler_sa_base + dep_samplers.size() * 4u)
-        : static_cast<uint16_t>(default_ub_count);
+    const uint16_t total_sa_regs = has_default_ub
+        ? static_cast<uint16_t>(program.uniform_sa_base + default_ub_count)
+        : (has_dep_samplers ? static_cast<uint16_t>(program.sampler_sa_base + dep_samplers.size() * 4u) : 0u);
 
     header.parameter_count = static_cast<uint32_t>(pending_params.size());
     header.parameters_offset = pending_params.empty()

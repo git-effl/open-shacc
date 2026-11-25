@@ -1,8 +1,6 @@
 /**
  * @file preprocessor.cpp
  * @brief Implementation of C Preprocessor for Cg / HLSL Shader Compilation.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "preprocessor.hpp"
@@ -47,13 +45,15 @@ void Preprocessor::add_macro(const std::string& name, const std::string& body) {
 void Preprocessor::add_function_macro(
     const std::string& name,
     const std::vector<std::string>& params,
-    const std::string& body
+    const std::string& body,
+    bool is_variadic
 ) {
     if (name.empty()) return;
     MacroDefinition def;
     def.name = name;
     def.params = params;
     def.is_function_like = true;
+    def.is_variadic = is_variadic;
     def.body = body;
     macros_[name] = std::move(def);
 }
@@ -124,6 +124,7 @@ bool Preprocessor::preprocess(
     std::string& out_diagnostics
 ) {
     include_stack_.clear();
+    has_error_ = false;
 
     // Built-in preprocessor defines (preserve caller-supplied pre-added macros)
     if (macros_.find("__PSP2__") == macros_.end()) add_macro("__PSP2__", "1");
@@ -147,9 +148,15 @@ bool Preprocessor::preprocess(
 
     std::ostringstream combined;
     // Process forced include files from options first, if any
-    if (options && options->includeFiles && options->includeFileCount > 0 && callbacks && callbacks->openFile) {
+    if (options && options->includeFiles && options->includeFileCount > 0) {
         for (uint32_t i = 0; i < options->includeFileCount; ++i) {
             if (!options->includeFiles[i]) continue;
+            if (!callbacks || !callbacks->openFile) {
+                has_error_ = true;
+                out_diagnostics += filename + ":1: error: Cannot open include file '" +
+                                   std::string(options->includeFiles[i]) + "' without openFile callback\n";
+                continue;
+            }
             const char* err_str = nullptr;
             const SceShaccCgSourceFile* inc_file = callbacks->openFile(
                 options->includeFiles[i], nullptr, options, &err_str
@@ -164,13 +171,21 @@ bool Preprocessor::preprocess(
                 if (callbacks->releaseFile) {
                     callbacks->releaseFile(inc_file, options);
                 }
+            } else {
+                if (inc_file && callbacks->releaseFile) {
+                    callbacks->releaseFile(inc_file, options);
+                }
+                has_error_ = true;
+                out_diagnostics += filename + ":1: error: Failed to open include file '" +
+                                   std::string(options->includeFiles[i]) + "'" +
+                                   (err_str ? std::string(" (") + err_str + ")" : "") + "\n";
             }
         }
     }
 
     combined << process_source(source, filename, options, callbacks, out_diagnostics, 0);
     out_processed = combined.str();
-    return true;
+    return !has_error_;
 }
 
 struct CondState {
@@ -189,7 +204,8 @@ std::string Preprocessor::process_source(
     int depth
 ) {
     if (depth > 32) {
-        out_diagnostics += "Error: Maximum #include depth exceeded in " + filename + "\n";
+        has_error_ = true;
+        out_diagnostics += filename + ":1: error: Maximum #include depth exceeded\n";
         return "";
     }
 
@@ -235,16 +251,24 @@ std::string Preprocessor::process_source(
             if (dir_name == "ifdef") {
                 std::string macro_name;
                 dir_ss >> macro_name;
+                if (macro_name.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: missing macro name after #ifdef\n";
+                }
                 bool outer = is_current_active();
-                bool is_def = outer && (macros_.find(macro_name) != macros_.end());
+                bool is_def = outer && !macro_name.empty() && (macros_.find(macro_name) != macros_.end());
                 cond_stack.push_back(CondState{outer, is_def, is_def, false});
                 output << "\n";
                 continue;
             } else if (dir_name == "ifndef") {
                 std::string macro_name;
                 dir_ss >> macro_name;
+                if (macro_name.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: missing macro name after #ifndef\n";
+                }
                 bool outer = is_current_active();
-                bool not_def = outer && (macros_.find(macro_name) == macros_.end());
+                bool not_def = outer && !macro_name.empty() && (macros_.find(macro_name) == macros_.end());
                 cond_stack.push_back(CondState{outer, not_def, not_def, false});
                 output << "\n";
                 continue;
@@ -252,42 +276,55 @@ std::string Preprocessor::process_source(
                 std::string expr;
                 std::getline(dir_ss, expr);
                 bool outer = is_current_active();
-                bool cond = outer ? evaluate_condition(expr) : false;
+                bool cond = outer ? evaluate_condition(expr, filename, line_no) : false;
                 cond_stack.push_back(CondState{outer, cond, cond, false});
                 output << "\n";
                 continue;
             } else if (dir_name == "elif") {
-                if (!cond_stack.empty()) {
+                if (cond_stack.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: stray #elif without matching #if\n";
+                } else {
                     auto& parent = cond_stack.back();
-                    if (!parent.in_else) {
-                        if (!parent.outer_active || parent.any_branch_taken) {
-                            parent.active = false;
-                        } else {
-                            std::string expr;
-                            std::getline(dir_ss, expr);
-                            bool cond = evaluate_condition(expr);
-                            parent.active = cond;
-                            if (cond) parent.any_branch_taken = true;
-                        }
+                    if (parent.in_else) {
+                        has_error_ = true;
+                        out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: #elif after #else\n";
+                        parent.active = false;
+                    } else if (!parent.outer_active || parent.any_branch_taken) {
+                        parent.active = false;
+                    } else {
+                        std::string expr;
+                        std::getline(dir_ss, expr);
+                        bool cond = evaluate_condition(expr, filename, line_no);
+                        parent.active = cond;
+                        if (cond) parent.any_branch_taken = true;
                     }
                 }
                 output << "\n";
                 continue;
             } else if (dir_name == "else") {
-                if (!cond_stack.empty()) {
+                if (cond_stack.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: stray #else without matching #if\n";
+                } else {
                     auto& parent = cond_stack.back();
                     if (!parent.in_else) {
                         parent.in_else = true;
                         parent.active = parent.outer_active && !parent.any_branch_taken;
                         parent.any_branch_taken = true;
                     } else {
+                        has_error_ = true;
+                        out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: duplicate #else directive\n";
                         parent.active = false;
                     }
                 }
                 output << "\n";
                 continue;
             } else if (dir_name == "endif") {
-                if (!cond_stack.empty()) {
+                if (cond_stack.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: stray #endif without matching #if\n";
+                } else {
                     cond_stack.pop_back();
                 }
                 output << "\n";
@@ -311,8 +348,10 @@ std::string Preprocessor::process_source(
 
                 std::string macro_name = rest.substr(0, name_end);
                 std::string remainder = rest.substr(name_end);
-
-                if (!remainder.empty() && remainder[0] == '(') {
+                if (macro_name.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: missing macro name in #define\n";
+                } else if (!remainder.empty() && remainder[0] == '(') {
                     // Function-like macro (no whitespace between name and '(')
                     size_t paren_close = remainder.find(')');
                     if (paren_close != std::string::npos) {
@@ -320,13 +359,27 @@ std::string Preprocessor::process_source(
                         std::string body_str = trim(remainder.substr(paren_close + 1));
 
                         std::vector<std::string> params;
+                        bool is_variadic = false;
                         std::istringstream p_ss(params_str);
                         std::string p;
                         while (std::getline(p_ss, p, ',')) {
                             p = trim(p);
+                            if (p == "...") {
+                                is_variadic = true;
+                                break;
+                            }
+                            if (p.size() > 3 && p.compare(p.size() - 3, 3, "...") == 0) {
+                                p = trim(p.substr(0, p.size() - 3));
+                                if (!p.empty()) params.push_back(p);
+                                is_variadic = true;
+                                break;
+                            }
                             if (!p.empty()) params.push_back(p);
                         }
-                        add_function_macro(macro_name, params, body_str);
+                        add_function_macro(macro_name, params, body_str, is_variadic);
+                    } else {
+                        has_error_ = true;
+                        out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: unterminated #define parameter list\n";
                     }
                 } else {
                     // Object-like macro
@@ -354,7 +407,11 @@ std::string Preprocessor::process_source(
                     }
                 }
 
-                if (callbacks && callbacks->openFile && !rest.empty()) {
+                if (rest.empty()) {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: invalid #include path\n";
+                    output << "\n";
+                } else if (callbacks && callbacks->openFile) {
                     SceShaccCgSourceLocation loc{};
                     loc.lineNumber = line_no;
                     loc.columnNumber = 1;
@@ -377,16 +434,27 @@ std::string Preprocessor::process_source(
                             callbacks->releaseFile(inc_file, options);
                         }
                     } else {
+                        if (inc_file && callbacks->releaseFile) {
+                            callbacks->releaseFile(inc_file, options);
+                        }
+                        has_error_ = true;
+                        out_diagnostics += filename + ":" + std::to_string(line_no) +
+                                           ": error: #include file not found: '" + rest + "'" +
+                                           (err_str ? std::string(" (") + err_str + ")" : "") + "\n";
                         output << "\n";
                     }
                 } else {
+                    has_error_ = true;
+                    out_diagnostics += filename + ":" + std::to_string(line_no) +
+                                       ": error: #include '" + rest + "' failed (no openFile callback)\n";
                     output << "\n";
                 }
                 continue;
             } else if (dir_name == "error") {
                 std::string rest;
                 std::getline(dir_ss, rest);
-                out_diagnostics += "#error " + trim(rest) + "\n";
+                has_error_ = true;
+                out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: #error " + trim(rest) + "\n";
                 output << "\n";
                 continue;
             } else {
@@ -402,14 +470,23 @@ std::string Preprocessor::process_source(
         }
 
         // Expand macros in non-directive lines
-        std::string expanded = expand_line_macros(line);
+        std::string expanded = expand_line_macros(line, filename, line_no);
         output << expanded << "\n";
+    }
+
+    if (!cond_stack.empty()) {
+        has_error_ = true;
+        out_diagnostics += filename + ":" + std::to_string(line_no) + ": error: unterminated #if/#ifdef/#ifndef block\n";
     }
 
     return output.str();
 }
 
-std::string Preprocessor::expand_line_macros(const std::string& line) {
+std::string Preprocessor::expand_line_macros(
+    const std::string& line,
+    const std::string& /*filename*/,
+    uint32_t /*line_no*/
+) {
     if (macros_.empty() || line.empty()) return line;
 
     std::string result = line;
@@ -489,23 +566,43 @@ std::string Preprocessor::expand_line_macros(const std::string& line) {
                             }
 
                             std::string expanded_body = def.body;
-                            for (size_t p = 0; p < def.params.size() && p < args.size(); ++p) {
-                                const std::string& param_pattern = def.params[p];
-                                if (param_pattern.empty()) continue;
+                            auto replace_param_token = [&](const std::string& pattern, const std::string& repl) {
+                                if (pattern.empty()) return;
                                 size_t pos = 0;
-                                while ((pos = expanded_body.find(param_pattern, pos)) != std::string::npos) {
+                                while ((pos = expanded_body.find(pattern, pos)) != std::string::npos) {
                                     bool valid_boundary = true;
                                     if (pos > 0 && is_ident_char(expanded_body[pos - 1])) valid_boundary = false;
-                                    size_t end_pos = pos + param_pattern.length();
+                                    size_t end_pos = pos + pattern.length();
                                     if (end_pos < expanded_body.length() && is_ident_char(expanded_body[end_pos])) valid_boundary = false;
 
                                     if (valid_boundary) {
-                                        expanded_body.replace(pos, param_pattern.length(), args[p]);
-                                        pos += args[p].length();
+                                        expanded_body.replace(pos, pattern.length(), repl);
+                                        pos += repl.length();
                                     } else {
-                                        pos += param_pattern.length();
+                                        pos += pattern.length();
                                     }
                                 }
+                            };
+
+                            for (size_t p = 0; p < def.params.size() && p < args.size(); ++p) {
+                                replace_param_token(def.params[p], args[p]);
+                            }
+                            if (def.is_variadic) {
+                                std::string va_joined;
+                                for (size_t a = def.params.size(); a < args.size(); ++a) {
+                                    if (!va_joined.empty()) va_joined += ", ";
+                                    va_joined += args[a];
+                                }
+                                if (va_joined.empty()) {
+                                    size_t comma_va = 0;
+                                    while ((comma_va = expanded_body.find(", ##__VA_ARGS__")) != std::string::npos) {
+                                        expanded_body.erase(comma_va, 15);
+                                    }
+                                    while ((comma_va = expanded_body.find(",##__VA_ARGS__")) != std::string::npos) {
+                                        expanded_body.erase(comma_va, 14);
+                                    }
+                                }
+                                replace_param_token("__VA_ARGS__", va_joined);
                             }
 
                             // Token concatenation ##
@@ -744,7 +841,11 @@ private:
 
 } // namespace
 
-bool Preprocessor::evaluate_condition(const std::string& expr) {
+bool Preprocessor::evaluate_condition(
+    const std::string& expr,
+    const std::string& filename,
+    uint32_t line_no
+) {
     std::string trimmed = trim(expr);
     if (trimmed.empty()) return false;
 
@@ -785,7 +886,7 @@ bool Preprocessor::evaluate_condition(const std::string& expr) {
     }
 
     // 2. Expand remaining macros inside the condition expression
-    eval_expr = expand_line_macros(eval_expr);
+    eval_expr = expand_line_macros(eval_expr, filename, line_no);
 
     // 3. Evaluate integer constant expression
     ConstExprEvaluator evaluator(eval_expr);

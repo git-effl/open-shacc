@@ -1,13 +1,12 @@
 /**
  * @file preprocessor.hpp
  * @brief C Preprocessor for Cg / HLSL Shader Compilation.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_PREPROCESSOR_HPP
 #define OPEN_SHACC_PREPROCESSOR_HPP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -19,6 +18,7 @@ struct MacroDefinition {
     std::string name;
     std::vector<std::string> params; // Empty for object-like macros
     bool is_function_like = false;
+    bool is_variadic = false;
     std::string body;
 };
 
@@ -28,7 +28,12 @@ public:
 
     void clear_macros();
     void add_macro(const std::string& name, const std::string& body = "1");
-    void add_function_macro(const std::string& name, const std::vector<std::string>& params, const std::string& body);
+    void add_function_macro(
+        const std::string& name,
+        const std::vector<std::string>& params,
+        const std::string& body,
+        bool is_variadic = false
+    );
 
     bool preprocess(
         const std::string& source,
@@ -42,6 +47,7 @@ public:
 private:
     std::unordered_map<std::string, MacroDefinition> macros_;
     std::vector<std::string> include_stack_;
+    bool has_error_ = false;
 
     std::string process_source(
         const std::string& source,
@@ -53,8 +59,16 @@ private:
     );
 
     static std::string strip_comments(const std::string& source);
-    std::string expand_line_macros(const std::string& line);
-    bool evaluate_condition(const std::string& expr);
+    std::string expand_line_macros(
+        const std::string& line,
+        const std::string& filename,
+        uint32_t line_no
+    );
+    bool evaluate_condition(
+        const std::string& expr,
+        const std::string& filename,
+        uint32_t line_no
+    );
 };
 
 } // namespace open_shacc::frontend

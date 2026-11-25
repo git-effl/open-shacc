@@ -3,11 +3,9 @@
  * @brief Clean-room Universal Scalable Shader Engine (USSE) Instruction Set Architecture.
  *
  * Implemented strictly from public open-source PowerVR SGX / USSE architecture
- * specifications and open-source GPLv2+ emulator instruction formats (Vita3K).
+ * specifications and open-source VitaSDK public headers.
  * Every 64-bit instruction word is constructed from named bitfields with zero
  * opaque binary constants.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef OPEN_SHACC_USSE_ISA_HPP
